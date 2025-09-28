@@ -59,5 +59,22 @@
         "MEITF",
         "SFTBY",
         "SONY"
+    ],
+    "AI Leaders": [
+        "NVDA",
+        "MSFT",
+        "GOOGL",
+        "AMZN",
+        "META",
+        "AVGO",
+        "AMD",
+        "TSM",
+        "ASML",
+        "CRM",
+        "SNOW",
+        "PLTR",
+        "ORCL",
+        "SHOP",
+        "NBIS"
     ]
 }
