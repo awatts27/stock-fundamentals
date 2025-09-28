@@ -3,3 +3,6 @@ pandas
 python-dotenv
 gspread
 google-auth
+streamlit
+altair
+sec-api
