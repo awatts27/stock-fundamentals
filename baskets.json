@@ -77,6 +77,22 @@
         "SHOP",
         "NBIS"
     ],
+    "China Growth": [
+        "TCEHY",
+        "BABA",
+        "MEITF",
+        "JD",
+        "PDD",
+        "BIDU",
+        "NTES",
+        "TCOM",
+        "LI",
+        "XPEV",
+        "NIO",
+        "BYDDF",
+        "BILI",
+        "KWAHY"
+    ],
     "US Health Insurers": [
         "UNH",
         "ELV",
