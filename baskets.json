@@ -76,5 +76,15 @@
         "ORCL",
         "SHOP",
         "NBIS"
+    ],
+    "US Health Insurers": [
+        "UNH",
+        "ELV",
+        "CI",
+        "HUM",
+        "CNC",
+        "MOH",
+        "OSCR",
+        "CVS"
     ]
 }
