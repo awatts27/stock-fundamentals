@@ -37,5 +37,27 @@
         "QBTS",
         "QUBT",
         "IONQ"
+    ],
+    "Europe Granolas": [
+        "GSK",
+        "RHHBY",
+        "ASML",
+        "NSRGY",
+        "NVS",
+        "NVO",
+        "LRLCY",
+        "LVMUY",
+        "AZN",
+        "SAP",
+        "SNY"
+    ],
+    "Asia Platform Leaders": [
+        "TSM",
+        "SSNLF",
+        "TCEHY",
+        "BABA",
+        "MEITF",
+        "SFTBY",
+        "SONY"
     ]
 }
