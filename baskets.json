@@ -1,0 +1,41 @@
+{
+    "My Portfolio": [
+        "OKLO",
+        "HOOD",
+        "AMZN",
+        "META",
+        "RDDT",
+        "NVDA",
+        "TOST",
+        "RSX",
+        "FUBO"
+    ],
+    "Nuclear": [
+        "OKLO",
+        "CCJ",
+        "BXXT",
+        "LEU",
+        "SMR",
+        "NLR",
+        "URA",
+        "URNM"
+    ],
+    "Mag7": [
+        "META",
+        "AMZN",
+        "NFLX",
+        "GOOG",
+        "AAPL",
+        "MSFT",
+        "NVDA"
+    ],
+    "Quantum": [
+        "QTUM",
+        "KEYS",
+        "FORM",
+        "RGTI",
+        "QBTS",
+        "QUBT",
+        "IONQ"
+    ]
+}

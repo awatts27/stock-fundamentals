@@ -1,0 +1,2 @@
+# Local secrets and other private configuration
+.streamlit/secrets.toml
