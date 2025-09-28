@@ -5,17 +5,25 @@ import yfinance as yf
 import math
 import json
 import os
+from datetime import datetime
 import altair as alt
+import requests
 from sec_api import QueryApi, ExtractorApi
 
 st.set_page_config(layout="wide")
 st.title("📊 Custom Stock Fundamentals Explorer")
+
+if "_welcome_shown" not in st.session_state:
+    st.toast("Welcome! Pick a basket in the sidebar to explore fundamentals and factors.", icon="👋")
+    st.session_state["_welcome_shown"] = True
 # --- Tabs for dashboard sections ---
-tab_fundamentals, tab_factors, tab_ownership, tab_earnings = st.tabs([
+tab_fundamentals, tab_factors, tab_regime, tab_ownership, tab_earnings, tab_glossary = st.tabs([
     "Fundamentals",
     "Factor-Based Smart Beta Portfolio",
+    "Macro Regime Insights",
     "Ownership",
     "Earnings Highlights",
+    "Guide & Glossary",
 ])
 def load_baskets(path="baskets.json"):
     if os.path.exists(path):
@@ -45,6 +53,24 @@ def get_sec_api_key() -> str:
     st.stop()
 
 
+def get_fred_api_key() -> str:
+    env_key = os.getenv("FRED_API_KEY")
+    if env_key:
+        return env_key
+
+    secrets_key = None
+    try:
+        secrets_key = st.secrets.get("FRED_API_KEY")  # type: ignore[attr-defined]
+    except Exception:
+        secrets_key = None
+
+    if secrets_key:
+        return secrets_key
+
+    st.error("FRED API key not configured. Add it to .streamlit/secrets.toml or set the FRED_API_KEY environment variable.")
+    st.stop()
+
+
 @st.cache_resource
 def get_sec_clients():
     key = get_sec_api_key()
@@ -66,6 +92,125 @@ CATEGORY_BY_METRIC = {
 }
 
 COLUMNS = ["Ticker"] + list(CATEGORY_BY_METRIC.keys())
+
+METRIC_GUIDE = {
+    "P/E (TTM)": {
+        "summary": "Price paid for each dollar of trailing earnings.",
+        "good": "10-20",
+        "caution": ">30 may imply rich valuation unless growth justifies it.",
+    },
+    "P/B": {
+        "summary": "Price relative to accounting book value.",
+        "good": "1-3",
+        "caution": "<1 can signal value or distress; >5 often means high optimism.",
+    },
+    "Dividend Yield %": {
+        "summary": "Cash income as a percent of price.",
+        "good": "2-5% for stable payers.",
+        "caution": ">8% could be unsustainable.",
+    },
+    "ROE %": {
+        "summary": "Profitability on shareholder equity.",
+        "good": ">15% shows strong efficiency.",
+        "caution": "<5% may trail peers.",
+    },
+    "Net Profit Margin %": {
+        "summary": "Percent of revenue kept as profit.",
+        "good": ">10% is solid for most industries.",
+        "caution": "Negative margins highlight losses.",
+    },
+    "Debt/Equity (pct)": {
+        "summary": "Financial leverage vs equity base.",
+        "good": "<100% = conservative leverage.",
+        "caution": ">200% means heavy debt reliance.",
+    },
+    "Current Ratio": {
+        "summary": "Short-term assets divided by liabilities.",
+        "good": "1.5-2.0 is healthy.",
+        "caution": "<1 raises liquidity questions.",
+    },
+    "Quick Ratio": {
+        "summary": "Liquidity without inventory.",
+        "good": ">1.0", "caution": "<0.8 may signal tight liquidity.",
+    },
+    "% Below 52W High": {
+        "summary": "Distance from recent high.",
+        "good": "0-15% shows momentum.",
+        "caution": ">30% may signal drawdown or opportunity.",
+    },
+    "Revenue YoY %": {
+        "summary": "Annual revenue growth rate.",
+        "good": ">10% = strong growth.",
+        "caution": "Negative growth warrants investigation.",
+    },
+    "Earnings YoY %": {
+        "summary": "Annual net income growth.",
+        "good": ">10% suggests expanding profitability.",
+        "caution": "Declines flag earnings pressure.",
+    },
+}
+
+
+def _extract_numeric_token(text: str | None) -> str | None:
+    if not text:
+        return None
+    token = text.strip().split()[0].rstrip('.')
+    return token if token else None
+
+
+def _parse_threshold(token: str, value: float) -> bool:
+    token_clean = token.replace('%', '')
+    if '-' in token_clean:
+        low, high = token_clean.split('-', 1)
+        try:
+            low_val = float(low)
+            high_val = float(high)
+        except ValueError:
+            return False
+        return low_val <= value <= high_val
+    if token.startswith('>='):
+        try:
+            return value >= float(token_clean[2:])
+        except ValueError:
+            return False
+    if token.startswith('>'):
+        try:
+            return value > float(token_clean[1:])
+        except ValueError:
+            return False
+    if token.startswith('<='):
+        try:
+            return value <= float(token_clean[2:])
+        except ValueError:
+            return False
+    if token.startswith('<'):
+        try:
+            return value < float(token_clean[1:])
+        except ValueError:
+            return False
+    try:
+        threshold = float(token_clean)
+    except ValueError:
+        return False
+    return value >= threshold
+
+
+def metric_is_strong(metric: str, raw_value) -> bool:
+    info = METRIC_GUIDE.get(metric)
+    if not info:
+        return False
+    if raw_value is None:
+        return False
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return False
+    if pd.isna(value):
+        return False
+    token = _extract_numeric_token(info.get('good'))
+    if not token:
+        return False
+    return _parse_threshold(token, value)
 
 
 def safe_div(a, b):
@@ -115,6 +260,65 @@ def fetch_price_history(tickers, period="2y") -> pd.DataFrame:
 
 def sanitize_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
+
+
+FACTOR_DESCRIPTIONS = {
+    "Value": "Rewards lower price ratios such as P/E and P/B, seeking bargains.",
+    "Quality": "Focuses on high ROE, robust margins, and manageable debt.",
+    "Momentum": "Highlights 12-month winners that continue to outperform.",
+}
+
+
+MACRO_GUIDE = {
+    "10Y-2Y Treasury Spread": {
+        "summary": "Positive spread = normal growth expectations; negative (inverted) often precedes recessions.",
+        "good": ">0%",
+        "caution": "<0% warns of economic slowdown.",
+    },
+    "CPI YoY": {
+        "summary": "Measures consumer inflation; rising prices can pressure profits but aid real assets.",
+        "good": "2-3% aligned with Fed target.",
+        "caution": ">3% suggests persistent inflation.",
+    },
+    "ISM Manufacturing PMI": {
+        "summary": "Survey of factory activity; 50 is the expansion/contraction line.",
+        "good": ">50 = expansion.",
+        "caution": "<50 indicates contraction.",
+    },
+}
+
+
+@st.cache_data(show_spinner="Fetching macro data…")
+def fetch_fred_series(series_id: str, observation_start: str = "2000-01-01") -> tuple[pd.DataFrame, str | None]:
+    api_key = get_fred_api_key()
+    params = {
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+        "observation_start": observation_start,
+    }
+    url = "https://api.stlouisfed.org/fred/series/observations"
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json().get("observations", [])
+    except Exception as exc:
+        return pd.DataFrame(), f"{series_id}: {exc}"
+    df = pd.DataFrame(data)
+    if df.empty:
+        return df, f"{series_id}: no data returned"
+    df["date"] = pd.to_datetime(df["date"])
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    return df.set_index("date").sort_index(), None
+
+
+def latest_value(df: pd.DataFrame) -> tuple[float | None, datetime | None]:
+    if df is None or df.empty:
+        return None, None
+    series = df["value"].dropna()
+    if series.empty:
+        return None, None
+    return series.iloc[-1], series.index[-1]
 
 
 @st.cache_data(show_spinner="Fetching data…")
@@ -326,9 +530,34 @@ columns_to_show = ["Ticker"] + selected_metrics
 
 with tab_fundamentals:
     st.header("Stock Fundamentals")
+    st.markdown(
+        "**Quick start:** Pick a basket, then sort the table to compare valuation, profitability, or growth across tickers."
+    )
+    with st.expander("How to use this tab", expanded=False):
+        st.markdown(
+            """
+1. **Choose a basket** in the sidebar or enter your own tickers.
+2. **Filter metrics** using the sidebar checkboxes to keep only the data you care about.
+3. **Sort or chart** any metric to spot leaders, laggards, or potential bargains.
+            """
+        )
     if tickers:
         data = [fetch_one(tk) for tk in tickers]
         df = pd.DataFrame(data, columns=COLUMNS)
+
+        with st.expander("Metric cheat sheet", expanded=False):
+            rows = []
+            for metric, info in METRIC_GUIDE.items():
+                baseline_text = f"Baseline: {info['good']}" if info.get('good') else ""
+                caution_text = f"Caution: {info['caution']}" if info.get('caution') else ""
+                details = "  \
+".join([text for text in [baseline_text, caution_text] if text])
+                rows.append(
+                    f"**{metric}** — {info['summary']}" + (f"  \
+{details}" if details else "")
+                )
+            st.markdown("\n".join(rows))
+            st.caption("Values with a soft green highlight fall inside the healthy range noted above.")
 
         # Filter columns based on user selection
         df = df[columns_to_show]
@@ -338,24 +567,29 @@ with tab_fundamentals:
         sort_ascending = st.sidebar.checkbox("Sort ascending", value=True)
         df = df.sort_values(by=sort_metric, ascending=sort_ascending, na_position='last')
 
-        # Format numeric values to 2 decimal places
-        def format_value(val, col):
-            if col in ["Avg Vol (10d)", "Avg Vol (3m)"]:
-                try:
-                    return f"{int(float(val)):,}" if val not in [None, "None", "nan"] and str(val).replace(",", "").replace(".", "").isdigit() else val
-                except Exception:
-                    return val
-            if isinstance(val, (int, float)) and not pd.isnull(val):
-                return f"{val:.2f}"
-            return val
         df = df.copy()
-        for col in df.columns:
-            # Only format leaf columns (not index levels)
-            if isinstance(col, tuple):
-                col_name = col[1]
-            else:
-                col_name = col
-            df[col] = df[col].apply(lambda x: format_value(x, col_name))
+        strong_flags = pd.DataFrame(False, index=df.index, columns=df.columns)
+        for idx in df.index:
+            for col in df.columns:
+                metric_name = col
+                raw_val = df.at[idx, col]
+                strong = metric_is_strong(metric_name, raw_val)
+                strong_flags.at[idx, col] = strong
+                if metric_name in ["Avg Vol (10d)", "Avg Vol (3m)"]:
+                    try:
+                        formatted = (
+                            f"{int(float(raw_val)):,}"
+                            if raw_val not in [None, "None", "nan"]
+                            and str(raw_val).replace(",", "").replace(".", "").isdigit()
+                            else raw_val
+                        )
+                    except Exception:
+                        formatted = raw_val
+                elif isinstance(raw_val, (int, float)) and not pd.isnull(raw_val):
+                    formatted = f"{raw_val:.2f}"
+                else:
+                    formatted = raw_val
+                df.at[idx, col] = formatted
 
         # Create MultiIndex columns: first row = categories, second = metric names
         metric_names = df.columns.tolist()
@@ -363,9 +597,16 @@ with tab_fundamentals:
         multi_index = pd.MultiIndex.from_tuples(
             zip(categories, metric_names), names=["Category", "Metric"])
         df.columns = multi_index
+        strong_flags.columns = multi_index
 
         st.success(f"Fetched data for {len(tickers)} tickers.")
-        st.dataframe(df, use_container_width=True)
+        def highlight_strong(row):
+            return [
+                "background-color: rgba(0,150,0,0.15)" if strong_flags.loc[row.name, col] else ""
+                for col in df.columns
+            ]
+
+        st.dataframe(df.style.apply(highlight_strong, axis=1), use_container_width=True)
 
         # Bar chart visualization
         chart_metric = st.sidebar.selectbox("Bar chart metric", options=columns_to_show[1:], index=0)
@@ -403,7 +644,6 @@ with tab_fundamentals:
                            mime="text/csv")
     else:
         st.info("Please enter one or more tickers in the sidebar.")
-
 with tab_factors:
     st.header("Factor-Based Smart Beta Portfolio")
     st.markdown(
@@ -419,12 +659,42 @@ with tab_factors:
 3. Review the ranked table, rolling return comparison, and factor correlation heatmap.
 """
     )
+    with st.expander("What the factors mean", expanded=False):
+        for name, desc in FACTOR_DESCRIPTIONS.items():
+            st.markdown(f"**{name}** — {desc}")
 
     if tickers:
+        if "value_weight_slider" not in st.session_state:
+            st.session_state["value_weight_slider"] = 0.33
+        if "quality_weight_slider" not in st.session_state:
+            st.session_state["quality_weight_slider"] = 0.33
+        if "momentum_weight_slider" not in st.session_state:
+            st.session_state["momentum_weight_slider"] = 0.34
+
+        preset_cols = st.columns(3)
+        if preset_cols[0].button("Balanced (33/33/34)"):
+            st.session_state["value_weight_slider"] = 0.33
+            st.session_state["quality_weight_slider"] = 0.33
+            st.session_state["momentum_weight_slider"] = 0.34
+        if preset_cols[1].button("Value Tilt"):
+            st.session_state["value_weight_slider"] = 0.5
+            st.session_state["quality_weight_slider"] = 0.3
+            st.session_state["momentum_weight_slider"] = 0.2
+        if preset_cols[2].button("Momentum Tilt"):
+            st.session_state["value_weight_slider"] = 0.2
+            st.session_state["quality_weight_slider"] = 0.2
+            st.session_state["momentum_weight_slider"] = 0.6
+
         weight_cols = st.columns(3)
-        value_weight = weight_cols[0].slider("Value weight", 0.0, 1.0, 0.33, 0.05)
-        quality_weight = weight_cols[1].slider("Quality weight", 0.0, 1.0, 0.33, 0.05)
-        momentum_weight = weight_cols[2].slider("Momentum weight", 0.0, 1.0, 0.34, 0.05)
+        value_weight = weight_cols[0].slider(
+            "Value weight", 0.0, 1.0, st.session_state["value_weight_slider"], 0.05, key="value_weight_slider"
+        )
+        quality_weight = weight_cols[1].slider(
+            "Quality weight", 0.0, 1.0, st.session_state["quality_weight_slider"], 0.05, key="quality_weight_slider"
+        )
+        momentum_weight = weight_cols[2].slider(
+            "Momentum weight", 0.0, 1.0, st.session_state["momentum_weight_slider"], 0.05, key="momentum_weight_slider"
+        )
         total_weight = value_weight + quality_weight + momentum_weight
         if total_weight == 0:
             st.error("Set at least one factor weight above zero to build the portfolio.")
@@ -480,9 +750,10 @@ with tab_factors:
             else:
                 score_df["Quality Score"] = 0
 
-            history_tickers = list(dict.fromkeys(tickers + ["^GSPC"]))
+            history_tickers = list(dict.fromkeys(tickers + ["^GSPC", "SPY"]))
             price_history = fetch_price_history(history_tickers, period="2y")
             twelve_month_returns = {}
+            benchmark_used = None
             if not price_history.empty:
                 for tk in tickers:
                     if tk in price_history.columns:
@@ -491,8 +762,10 @@ with tab_factors:
                             series = series.iloc[-252:]
                         if len(series) >= 2:
                             twelve_month_returns[tk] = series.iloc[-1] / series.iloc[0] - 1
-                if "^GSPC" in price_history.columns:
-                    sp_series = price_history["^GSPC"].dropna()
+                benchmark_candidates = [col for col in ["^GSPC", "SPY"] if col in price_history.columns]
+                if benchmark_candidates:
+                    benchmark_used = benchmark_candidates[0]
+                    sp_series = price_history[benchmark_used].dropna()
                     if len(sp_series) > 250:
                         sp_series = sp_series.iloc[-252:]
                     if len(sp_series) >= 2:
@@ -509,14 +782,14 @@ with tab_factors:
             score_df["Momentum Score"] = momentum_rank.fillna(0)
             score_df["12M Return %"] = momentum_series.mul(100)
             score_df["Beating Market"] = False
-            if market_return is not None:
+            if market_return is not None and benchmark_used:
                 score_df.loc[momentum_series.index, "Beating Market"] = (
                     momentum_series > market_return
                 )
                 st.caption(
-                    f"S&P 500 12-month return: {market_return * 100:.2f}%"
+                    f"Benchmark ({benchmark_used}) 12-month return: {market_return * 100:.2f}%"
                     if market_return is not None
-                    else "S&P 500 12-month return unavailable."
+                    else "Benchmark 12-month return unavailable."
                 )
 
             for col in ["Value Score", "Quality Score", "Momentum Score"]:
@@ -574,6 +847,7 @@ with tab_factors:
                 }
             )
             st.dataframe(styled, use_container_width=True)
+            st.caption("Tip: Look for checkmarks in the Top Decile column to find the strongest multi-factor names.")
 
             if top_tickers and not price_history.empty:
                 st.subheader("Rolling 3-Month Returns vs S&P 500")
@@ -582,30 +856,36 @@ with tab_factors:
                     "against the S&P 500 using 3-month rolling returns. Positive spreads indicate periods "
                     "where the factor blend outperformed the broad market."
                 )
-                aligned_history = price_history[top_tickers + ["^GSPC"]].dropna(how="all")
-                portfolio_returns = aligned_history[top_tickers].pct_change().dropna()
-                if not portfolio_returns.empty and "^GSPC" in aligned_history.columns:
-                    equal_weight_returns = portfolio_returns.mean(axis=1)
-                    market_returns_series = aligned_history["^GSPC"].pct_change().dropna()
-                    window = 63
+                available_cols = [col for col in top_tickers if col in price_history.columns]
+                benchmark_candidates = [col for col in ["^GSPC", "SPY"] if col in price_history.columns]
+                benchmark_col = benchmark_candidates[0] if benchmark_candidates else None
+                if not available_cols or benchmark_col is None:
+                    st.info("Need benchmark data (S&P 500 or SPY) and valid top-decile price history to plot rolling returns.")
+                else:
+                    aligned_history = price_history[available_cols + [benchmark_col]].dropna(how="all")
+                    portfolio_returns = aligned_history[available_cols].pct_change().dropna()
+                    if not portfolio_returns.empty and benchmark_col in aligned_history.columns:
+                        equal_weight_returns = portfolio_returns.mean(axis=1)
+                        market_returns_series = aligned_history[benchmark_col].pct_change().dropna()
+                        window = 63
 
-                    def rolling_total_return(series):
-                        return (
-                            (1 + series).rolling(window).apply(lambda x: (1 + x).prod() - 1)
-                        )
+                        def rolling_total_return(series):
+                            return (
+                                (1 + series).rolling(window).apply(lambda x: (1 + x).prod() - 1)
+                            )
 
-                    portfolio_rolling = rolling_total_return(equal_weight_returns).dropna()
-                    market_rolling = rolling_total_return(market_returns_series).dropna()
-                    returns_df = (
-                        pd.concat(
-                            [
-                                portfolio_rolling.rename("Smart Beta"),
-                                market_rolling.rename("S&P 500"),
-                            ],
-                            axis=1,
+                        portfolio_rolling = rolling_total_return(equal_weight_returns).dropna()
+                        market_rolling = rolling_total_return(market_returns_series).dropna()
+                        returns_df = (
+                            pd.concat(
+                                [
+                                    portfolio_rolling.rename("Smart Beta"),
+                                market_rolling.rename(benchmark_col),
+                                ],
+                                axis=1,
+                            )
+                            .dropna()
                         )
-                        .dropna()
-                    )
                     if not returns_df.empty:
                         returns_df = returns_df.reset_index().melt(
                             "Date", var_name="Portfolio", value_name="Rolling Return"
@@ -624,8 +904,6 @@ with tab_factors:
                         st.altair_chart(chart, use_container_width=True)
                     else:
                         st.info("Not enough price history to calculate rolling returns.")
-                else:
-                    st.info("Insufficient price data to build the rolling return comparison.")
             else:
                 st.info("Need sufficient price history and at least one top-decile stock to chart rolling returns.")
 
@@ -674,6 +952,157 @@ with tab_factors:
     else:
         st.info("Please enter one or more tickers in the sidebar.")
 
+with tab_regime:
+    st.header("Macro Regime Insights")
+    st.markdown(
+        "Blend macro signals with your equity baskets. The indicators below highlight whether to lean "
+        "defensive, cyclical, commodity-heavy, or healthcare-focused this month."
+    )
+    st.info(
+        "Signals update with the latest data from the Federal Reserve Economic Data (FRED) API. "
+        "Green tiles indicate a benign backdrop; amber or red suggest caution and potential allocation shifts."
+    )
+    with st.expander("How to interpret the signals", expanded=False):
+        st.markdown(
+            """
+1. **Check the indicator tiles** – green values = supportive backdrop, amber/red = caution.
+2. **Review the suggested tilt** – compare weights to the equal-weight baseline.
+3. **Read the model notes** – see which macro triggers caused the shift.
+            """
+        )
+
+    errors = []
+    yield_curve_df, yield_err = fetch_fred_series("T10Y2Y", observation_start="2010-01-01")
+    if yield_err:
+        errors.append(yield_err)
+    cpi_df, cpi_err = fetch_fred_series("CPIAUCSL", observation_start="2010-01-01")
+    if cpi_err:
+        errors.append(cpi_err)
+    pmi_df, pmi_err = fetch_fred_series("NAPM", observation_start="2010-01-01")
+    if pmi_err or pmi_df.empty:
+        fallback_df, fallback_err = fetch_fred_series("ISM/MAN_PMI", observation_start="2010-01-01")
+        if fallback_err:
+            errors.append(f"PMI fallback: {fallback_err}")
+        else:
+            pmi_df = fallback_df
+            pmi_err = None
+    if pmi_err:
+        errors.append(pmi_err)
+
+    if errors:
+        st.warning(
+            "Some macro series were unavailable. Missing datasets were skipped so the model can still run.\n"
+            + "\n".join(f"- {err}" for err in errors)
+        )
+
+    yield_value, yield_date = latest_value(yield_curve_df)
+    cpi_latest, cpi_date = latest_value(cpi_df)
+    pmi_value, pmi_date = latest_value(pmi_df)
+
+    cpi_yoy = None
+    if cpi_df is not None and not cpi_df.empty:
+        cpi_series = cpi_df["value"].dropna()
+        if len(cpi_series) > 12:
+            cpi_yoy = cpi_series.iloc[-1] / cpi_series.iloc[-13] - 1
+
+    yield_inverted = yield_value is not None and yield_value < 0
+    inflation_hot = cpi_yoy is not None and cpi_yoy > 0.03
+    pmi_contraction = pmi_value is not None and pmi_value < 50
+
+    indicator_cols = st.columns(3)
+
+    def format_date(dt: datetime | None) -> str:
+        return dt.strftime("%Y-%m-%d") if dt else "N/A"
+
+    indicator_cols[0].metric(
+        "10Y-2Y Treasury Spread",
+        f"{yield_value:.2f}%" if yield_value is not None else "N/A",
+    )
+    indicator_cols[0].write(f"Last update: {format_date(yield_date)}")
+    indicator_cols[0].markdown("<small>Negative = inverted curve, historically a recession warning.</small>", unsafe_allow_html=True)
+
+    indicator_cols[1].metric(
+        "CPI YoY",
+        f"{cpi_yoy * 100:.2f}%" if cpi_yoy is not None else "N/A",
+    )
+    indicator_cols[1].write(f"Last update: {format_date(cpi_date)}")
+    indicator_cols[1].markdown("<small>>3% suggests inflation pressures favouring real assets.</small>", unsafe_allow_html=True)
+
+    indicator_cols[2].metric(
+        "ISM Manufacturing PMI",
+        f"{pmi_value:.1f}" if pmi_value is not None else "N/A",
+    )
+    indicator_cols[2].write(f"Last update: {format_date(pmi_date)}")
+    indicator_cols[2].markdown("<small><50 implies manufacturing contraction.</small>", unsafe_allow_html=True)
+
+    allocations = {
+        "Defensives": 0.2,
+        "Cyclicals": 0.2,
+        "Commodities & Energy": 0.2,
+        "Healthcare": 0.2,
+        "Growth & Innovation": 0.2,
+    }
+    rationale = []
+
+    def shift_weight(source: str, target: str, pct: float):
+        if allocations.get(source, 0) <= 0:
+            return
+        take = min(pct, allocations[source])
+        allocations[source] -= take
+        allocations[target] = allocations.get(target, 0) + take
+
+    if yield_inverted:
+        shift_weight("Cyclicals", "Defensives", 0.1)
+        rationale.append("Yield curve inverted → tilt toward defensives and lower-volatility holdings.")
+
+    if inflation_hot:
+        shift_weight("Defensives", "Commodities & Energy", 0.1)
+        rationale.append("Inflation above target → increase exposure to commodities and energy plays.")
+
+    if pmi_contraction:
+        shift_weight("Cyclicals", "Healthcare", 0.1)
+        rationale.append("PMI below 50 → reallocate from cyclicals into healthcare resilience.")
+
+    allocations = {k: max(v, 0) for k, v in allocations.items()}
+    total_alloc = sum(allocations.values())
+    if total_alloc > 0:
+        allocations = {k: v / total_alloc for k, v in allocations.items()}
+
+    alloc_df = (
+        pd.DataFrame.from_dict(allocations, orient="index", columns=["Suggested Weight"])
+        .sort_values("Suggested Weight", ascending=False)
+    )
+
+    st.subheader("Suggested Factor Tilt")
+    st.markdown(
+        "Weights show the model's preferred tilt given current macro readings. Start from equal weights and apply the adjustments below."
+    )
+    st.dataframe(
+        alloc_df.style.format({"Suggested Weight": "{:.0%}"}),
+        use_container_width=True,
+    )
+
+    st.subheader("Model Notes")
+    if rationale:
+        for note in rationale:
+            st.markdown(f"- {note}")
+    else:
+        st.markdown("- Indicators sit in neutral ranges → stay close to baseline allocations.")
+
+    st.markdown(
+        """
+**How to act:**
+
+- **Defensives** → Think staples, utilities, large-cap quality (e.g., use the *Europe Granolas* basket).
+- **Commodities & Energy** → Use resource-heavy baskets like *Nuclear* when inflation runs hot.
+- **Healthcare** → Defensive demand when growth slows; consider building a dedicated basket.
+- **Growth & Innovation** → Keep exposure through high-beta names such as the *AI Leaders* basket, trimming when the curve inverts.
+- **Cyclicals** → Industrials, consumer discretionary; lighten up when PMI dips below 50.
+"""
+    )
+
+    st.caption("Benchmarks: Yield curve (T10Y2Y), CPI (CPIAUCSL), PMI (NAPM) sourced from FRED. Updates typically monthly.")
+
 with tab_ownership:
     st.header("SEC Ownership Data")
     st.info("Displays insider trading activity from recent SEC filings.")
@@ -683,7 +1112,14 @@ with tab_ownership:
 - Only the first ticker in your selection is shown here. If you select multiple stocks, only the first one will be used for SEC filings.
 - To view ownership data for a specific stock, filter to a single ticker using the sidebar basket or by entering just one ticker in the input box.
 """)
-    from datetime import datetime
+    with st.expander("Quick start", expanded=False):
+        st.markdown(
+            """
+1. **Choose one ticker** in the sidebar (Form 4s show for the first symbol).
+2. **Set a date range** to focus on recent insider trades.
+3. **Open filing links** to read the actual SEC documents in a new tab.
+            """
+        )
     # Date range filter for insider trades
     default_start = datetime.now().replace(month=1, day=1).date()
     default_end = datetime.now().date()
@@ -737,6 +1173,14 @@ with tab_ownership:
 with tab_earnings:
     st.header("Earnings Highlights")
     st.info("Pulls the latest 8-K Item 2.02 (earnings release) to surface a quick snippet and links.")
+    with st.expander("Quick start", expanded=False):
+        st.markdown(
+            """
+1. **Select a ticker** (first symbol in your basket is used).
+2. **Pick an earnings filing** from the dropdown to read the highlights.
+3. **Follow the links** to the SEC filing or press release for full details.
+            """
+        )
     if tickers:
         ticker = tickers[0]
         st.subheader(f"Latest Earnings Release for {ticker}")
@@ -802,3 +1246,70 @@ with tab_earnings:
                 st.markdown(" | ".join(links))
     else:
         st.info("Please enter one or more tickers in the sidebar.")
+
+with tab_glossary:
+    st.header("Guide & Glossary")
+    st.markdown(
+        "Use this cheat sheet to decode the metrics, factors, and macro signals used across the dashboard. "
+        "Share it with teammates who are new to equity analysis so everyone speaks the same language."
+    )
+
+    st.subheader("Playbook: How to explore a basket")
+    st.markdown(
+        """
+1. **Scan fundamentals** – Sort the table by valuation or profitability to spot standout names.
+2. **Blend factors** – Use the smart beta tab to tilt toward value, quality, or momentum.
+3. **Check the macro backdrop** – Note whether the regime tab suggests being defensive or risk-on.
+4. **Dive into filings** – Review insider trades and earnings releases for catalysts.
+        """
+    )
+
+    st.subheader("Fundamental metrics at a glance")
+    metric_rows = []
+    for metric, info in METRIC_GUIDE.items():
+        metric_rows.append(
+            {
+                "Metric": metric,
+                "What it means": info.get("summary", ""),
+                "Healthy range": info.get("good", ""),
+                "Watch out": info.get("caution", ""),
+            }
+        )
+    metric_df = pd.DataFrame(metric_rows)
+    st.dataframe(metric_df, use_container_width=True)
+
+    st.subheader("Factor definitions")
+    factor_rows = [
+        {"Factor": name, "Plain-English explanation": desc}
+        for name, desc in FACTOR_DESCRIPTIONS.items()
+    ]
+    st.table(pd.DataFrame(factor_rows))
+
+    st.subheader("Macro signal cheat sheet")
+    macro_rows = []
+    for name, info in MACRO_GUIDE.items():
+        macro_rows.append(
+            {
+                "Indicator": name,
+                "Why it matters": info.get("summary", ""),
+                "Healthy": info.get("good", ""),
+                "Caution": info.get("caution", ""),
+            }
+        )
+    st.table(pd.DataFrame(macro_rows))
+
+    st.subheader("FAQ")
+    st.markdown(
+        """
+**Where does the data come from?**  
+Market and fundamentals: Yahoo Finance (`yfinance`). Filings: SEC’s `sec-api`. Macro: Federal Reserve Economic Data (FRED).
+
+**What if a value looks odd or missing?**  
+Some companies do not report certain items every quarter. Values marked `None` mean data was unavailable from the source.
+
+**How often should I refresh the factors?**  
+Monthly works well—rerun the tab after earnings season or major macro events.
+        """
+    )
+
+    st.caption("Tip: Save or print this tab for onboarding new analysts.")

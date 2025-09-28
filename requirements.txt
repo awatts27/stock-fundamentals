@@ -6,3 +6,4 @@ google-auth
 streamlit
 altair
 sec-api
+requests
