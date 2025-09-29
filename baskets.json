@@ -6,7 +6,6 @@
         "META",
         "RDDT",
         "NVDA",
-        "TOST",
         "RSX",
         "FUBO"
     ],
@@ -102,5 +101,22 @@
         "MOH",
         "OSCR",
         "CVS"
+    ],
+    "Climate Adaption": [
+        "XYL",
+        "J",
+        "ACM",
+        "TTEK",
+        "FIW",
+        "PHO"
+    ],
+    "Cyber Security": [
+        "PANW",
+        "CRWD",
+        "FTNT",
+        "ZS",
+        "CYBR",
+        "IHAK",
+        "CIBR"
     ]
 }
