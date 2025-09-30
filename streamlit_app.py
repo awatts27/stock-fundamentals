@@ -34,6 +34,7 @@ def load_baskets(path="baskets.json"):
 baskets = load_baskets()
 basket_names = list(baskets.keys())
 basket_names.insert(0, "Custom")
+basket_names.insert(1, "All Baskets")
 
 def get_sec_api_key() -> str:
     env_key = os.getenv("SEC_API_KEY")
@@ -83,6 +84,8 @@ queryApi, extractorApi = get_sec_clients()
 CATEGORY_BY_METRIC = {
     "Current Price": "Price/Volume", "52W High": "Price/Volume", "52W Low": "Price/Volume",
     "% Below 52W High": "Price/Volume", "Avg Vol (10d)": "Price/Volume", "Avg Vol (3m)": "Price/Volume",
+    "Market Cap": "Size",
+    "Company Name": "Profile",
     "P/E (TTM)": "Valuation", "P/B": "Valuation", "Dividend Yield %": "Valuation",
     "Net Profit Margin %": "Profitability", "ROE %": "Profitability",
     "Current Ratio": "Liquidity", "Quick Ratio": "Liquidity",
@@ -108,6 +111,11 @@ METRIC_GUIDE = {
         "summary": "Cash income as a percent of price.",
         "good": "2-5% for stable payers.",
         "caution": ">8% could be unsustainable.",
+    },
+    "Market Cap": {
+        "summary": "Company size measured by market capitalization (shares outstanding × price).",
+        "good": "Match to your risk tolerance: mega caps provide stability; smaller caps can be volatile.",
+        "caution": "Thinly traded micro caps (<$500M) can be illiquid and risky.",
     },
     "ROE %": {
         "summary": "Profitability on shareholder equity.",
@@ -226,6 +234,29 @@ def pct(x):
     return None if x is None else x * 100.0
 
 
+def _normalize_label(label: str) -> str:
+    return label.replace(" ", "").lower()
+
+
+def _lookup_balance_value(frame: pd.DataFrame | None, aliases: list[str]) -> float | None:
+    if frame is None or frame.empty:
+        return None
+    try:
+        column = frame.columns[0]
+    except (IndexError, KeyError):
+        return None
+    normalized_index = {_normalize_label(str(idx)): idx for idx in frame.index}
+    for alias in aliases:
+        key = _normalize_label(alias)
+        if key in normalized_index:
+            try:
+                value = frame.at[normalized_index[key], column]
+                return value
+            except Exception:
+                continue
+    return None
+
+
 def condense_text(text: str, max_chars: int = 800) -> str:
     """Squash whitespace and trim to a readable snippet."""
     if not text:
@@ -238,6 +269,50 @@ def condense_text(text: str, max_chars: int = 800) -> str:
     return f"{shortened}…"
 
 
+def format_market_cap(value) -> str | None:
+    """Represent market cap in friendly units (BN or M when large)."""
+    if value in [None, "", "None"]:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return value
+    if pd.isna(numeric):
+        return None
+    prefix = "-" if numeric < 0 else ""
+    magnitude = abs(numeric)
+    if magnitude >= 1_000_000_000:
+        trimmed = f"{magnitude / 1_000_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{prefix}{trimmed}BN"
+    if magnitude >= 1_000_000:
+        trimmed = f"{magnitude / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{prefix}{trimmed}M"
+    return f"{prefix}{magnitude:,.0f}"
+
+
+def parse_display_number(value) -> float | None:
+    """Convert formatted display values back to numeric for charts/calculations."""
+    if value in [None, "", "None"]:
+        return None
+    if isinstance(value, (int, float)):
+        return None if pd.isna(value) else float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    cleaned = text.replace(",", "").upper()
+    multiplier = 1.0
+    if cleaned.endswith("BN"):
+        multiplier = 1_000_000_000.0
+        cleaned = cleaned[:-2]
+    elif cleaned.endswith("M"):
+        multiplier = 1_000_000.0
+        cleaned = cleaned[:-1]
+    try:
+        return float(cleaned) * multiplier
+    except ValueError:
+        return None
+
+
 @st.cache_data(show_spinner="Fetching price history…")
 def fetch_price_history(tickers, period="2y") -> pd.DataFrame:
     if not tickers:
@@ -248,13 +323,31 @@ def fetch_price_history(tickers, period="2y") -> pd.DataFrame:
         auto_adjust=True,
         progress=False,
     )
-    if isinstance(data, pd.DataFrame) and "Adj Close" in data.columns:
-        adj_close = data["Adj Close"]
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    if isinstance(data.columns, pd.MultiIndex):
+        primary_levels = list(data.columns.levels[0])
+        target_level = None
+        for candidate in ["Adj Close", "Close", "Close*"]:
+            if candidate in primary_levels:
+                target_level = candidate
+                break
+        if target_level is None and primary_levels:
+            target_level = primary_levels[0]
+        adj_close = data.xs(target_level, axis=1, level=0) if target_level else data
     else:
-        adj_close = data
+        if "Adj Close" in data.columns:
+            adj_close = data["Adj Close"]
+        elif "Close" in data.columns:
+            adj_close = data["Close"]
+        else:
+            adj_close = data
+
     if isinstance(adj_close, pd.Series):
         adj_close = adj_close.to_frame(tickers[0])
     adj_close = adj_close.dropna(how="all")
+    adj_close.columns = [str(col) for col in adj_close.columns]
     return adj_close
 
 
@@ -337,6 +430,8 @@ def fetch_one(tk: str) -> dict:
                          high52) if current_price and high52 else None
     avg10d = info.get("averageDailyVolume10Day")
     avg3m = info.get("averageVolume")
+    market_cap = info.get("marketCap")
+    company_name = info.get("longName") or info.get("shortName") or info.get("name")
     pe_ttm = info.get("trailingPE")
     pb = info.get("priceToBook")
     div_y = pct(info.get("dividendYield")) if info.get(
@@ -347,23 +442,41 @@ def fetch_one(tk: str) -> dict:
         "profitMargins") else None
 
     # Liquidity
-    curr_assets = curr_liabs = inventory = None
-    if bs_q is not None and not bs_q.empty:
+    curr_assets = curr_liabs = None
+    inventory = 0.0
+    inventory_found = False
+    for sheet in [bs_q, t.balance_sheet]:
+        if sheet is None or sheet.empty:
+            continue
         try:
-            col = bs_q.columns[0]
-            curr_assets = bs_q.at["Total Current Assets",
-                                  col] if "Total Current Assets" in bs_q.index else None
-            curr_liabs = bs_q.at["Total Current Liabilities",
-                                 col] if "Total Current Liabilities" in bs_q.index else None
-            inventory = bs_q.at["Inventory",
-                                col] if "Inventory" in bs_q.index else 0
+            curr_assets = curr_assets if curr_assets is not None else _lookup_balance_value(
+                sheet, ["Total Current Assets", "TotalCurrentAssets", "CurrentAssets"]
+            )
+            curr_liabs = curr_liabs if curr_liabs is not None else _lookup_balance_value(
+                sheet, ["Total Current Liabilities", "TotalCurrentLiabilities", "CurrentLiabilities"]
+            )
+            if not inventory_found:
+                inv_val = _lookup_balance_value(
+                    sheet,
+                    ["Inventory", "Total Inventory", "InventoryNet", "InventoryCurrent"],
+                )
+                if inv_val is not None:
+                    inventory = inv_val
+                    inventory_found = True
         except Exception as e:
             st.warning(f"Error extracting liquidity metrics: {e}")
-            curr_assets = curr_liabs = inventory = None
+            curr_assets = curr_liabs = None
+            inventory_found = False
+        if curr_assets is not None and curr_liabs is not None:
+            break
 
     current_ratio = safe_div(curr_assets, curr_liabs)
-    quick_ratio = safe_div(
-        curr_assets - inventory if curr_assets is not None else None, curr_liabs)
+    quick_numerator = curr_assets - inventory if (curr_assets is not None and inventory_found) else None
+    quick_ratio = safe_div(quick_numerator, curr_liabs)
+    if current_ratio is None:
+        current_ratio = info.get("currentRatio")
+    if quick_ratio is None:
+        quick_ratio = info.get("quickRatio")
 
     # Leverage
     de = info.get("debtToEquity")
@@ -430,6 +543,8 @@ def fetch_one(tk: str) -> dict:
         "% Below 52W High": pct_below_high,
         "Avg Vol (10d)": avg10d,
         "Avg Vol (3m)": avg3m,
+        "Market Cap": market_cap,
+        "Company Name": company_name,
         "P/E (TTM)": pe_ttm,
         "P/B": pb,
         "Dividend Yield %": div_y,
@@ -503,18 +618,30 @@ with st.sidebar.expander("ℹ️ What do these metrics mean?", expanded=False):
     - *Interpretation:* Positive growth is good; >10% is strong.
     """)
 st.sidebar.header("Configuration")
-basket_choice = st.sidebar.selectbox("Select basket", options=basket_names, index=0)
-if basket_choice != "Custom":
-    default_tickers = ",".join(baskets[basket_choice])
-else:
-    default_tickers = "BMNR,FLNC,OPEN,TEM,CRWV,RKLB,ASTS"
-tickers_input = st.sidebar.text_input(
-    "Enter comma-separated tickers", value=default_tickers)
-if basket_choice != "Custom":
-    # Always use basket tickers if basket selected
-    tickers = baskets[basket_choice]
-else:
+basket_choice = st.sidebar.selectbox(
+    "Select basket",
+    options=basket_names,
+    index=None,
+    placeholder="Pick a basket to load tickers",
+)
+
+tickers_input = ""
+if basket_choice is None or basket_choice == "Custom":
+    tickers_input = st.sidebar.text_input(
+        "Enter comma-separated tickers",
+        value="",
+        placeholder="e.g. AAPL,MSFT,GOOGL",
+    )
     tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+elif basket_choice == "All Baskets":
+    combined = []
+    for members in baskets.values():
+        combined.extend(members)
+    # Preserve first occurrence order while removing duplicates
+    tickers = list(dict.fromkeys(combined))
+else:
+    # Always use basket tickers if a preset basket is selected
+    tickers = baskets.get(basket_choice, [])
 
 # Metric/category selection
 all_metrics = list(CATEGORY_BY_METRIC.keys())
@@ -522,8 +649,11 @@ all_categories = sorted(set(CATEGORY_BY_METRIC.values()))
 selected_categories = st.sidebar.multiselect(
     "Select categories to display", options=all_categories, default=all_categories)
 filtered_metrics = [m for m in all_metrics if CATEGORY_BY_METRIC[m] in selected_categories]
+default_metrics = [m for m in filtered_metrics if m != "Company Name"]
+if not default_metrics:
+    default_metrics = filtered_metrics
 selected_metrics = st.sidebar.multiselect(
-    "Select metrics to display", options=filtered_metrics, default=filtered_metrics)
+    "Select metrics to display", options=filtered_metrics, default=default_metrics)
 columns_to_show = ["Ticker"] + selected_metrics
 
 # Fetch & display
@@ -585,6 +715,8 @@ with tab_fundamentals:
                         )
                     except Exception:
                         formatted = raw_val
+                elif metric_name == "Market Cap":
+                    formatted = format_market_cap(raw_val)
                 elif isinstance(raw_val, (int, float)) and not pd.isnull(raw_val):
                     formatted = f"{raw_val:.2f}"
                 else:
@@ -609,41 +741,39 @@ with tab_fundamentals:
         st.dataframe(df.style.apply(highlight_strong, axis=1), use_container_width=True)
 
         # Bar chart visualization
-        chart_metric = st.sidebar.selectbox("Bar chart metric", options=columns_to_show[1:], index=0)
-        st.subheader(f"Bar Chart: {chart_metric}")
-        # Access MultiIndex columns correctly
-        ticker_col = ("", "Ticker")
-        metric_col = (CATEGORY_BY_METRIC.get(chart_metric, ""), chart_metric)
-        tickers_list = df[ticker_col].tolist()
-        metric_values = []
-        for x in df[metric_col].values:
-            try:
-                val = float(str(x).replace(",", ""))
-            except Exception:
-                val = None
-            metric_values.append(val)
-        # Replace missing or non-numeric values with zero (after building metric_values)
-        metric_values = [v if isinstance(v, (int, float)) and not pd.isnull(v) else 0 for v in metric_values]
-        chart_data = pd.DataFrame({
-            "Ticker": tickers_list,
-            chart_metric: metric_values
-        })
-        chart_data = chart_data.sort_values(by=chart_metric, ascending=False)
+        chart_options = [m for m in columns_to_show[1:] if m != "Company Name"]
+        if chart_options:
+            chart_metric = st.sidebar.selectbox("Bar chart metric", options=chart_options, index=0)
+            st.subheader(f"Bar Chart: {chart_metric}")
+            # Access MultiIndex columns correctly
+            ticker_col = ("", "Ticker")
+            metric_col = (CATEGORY_BY_METRIC.get(chart_metric, ""), chart_metric)
+            tickers_list = df[ticker_col].tolist()
+            metric_values = [parse_display_number(x) for x in df[metric_col].values]
+            # Replace missing or non-numeric values with zero (after building metric_values)
+            metric_values = [v if v is not None and not pd.isnull(v) else 0 for v in metric_values]
+            chart_data = pd.DataFrame({
+                "Ticker": tickers_list,
+                chart_metric: metric_values
+            })
+            chart_data = chart_data.sort_values(by=chart_metric, ascending=False)
 
-        # Altair bar chart for correct sorting
-        bar = alt.Chart(chart_data).mark_bar().encode(
-            x=alt.X('Ticker', sort=list(chart_data['Ticker'])),
-            y=alt.Y(chart_metric),
-            tooltip=['Ticker', chart_metric]
-        ).properties(width=700, height=350)
-        st.altair_chart(bar, use_container_width=True)
+            # Altair bar chart for correct sorting
+            bar = alt.Chart(chart_data).mark_bar().encode(
+                x=alt.X('Ticker', sort=list(chart_data['Ticker'])),
+                y=alt.Y(chart_metric),
+                tooltip=['Ticker', chart_metric]
+            ).properties(width=700, height=350)
+            st.altair_chart(bar, use_container_width=True)
+        else:
+            st.info("Select at least one numeric metric to plot the bar chart.")
 
         st.download_button("Download CSV",
                            df.to_csv(index=False),
                            file_name="fundamentals.csv",
                            mime="text/csv")
     else:
-        st.info("Please enter one or more tickers in the sidebar.")
+        st.info("Select a basket or enter tickers in the sidebar to load data.")
 with tab_factors:
     st.header("Factor-Based Smart Beta Portfolio")
     st.markdown(
@@ -950,7 +1080,7 @@ with tab_factors:
                     """
                 )
     else:
-        st.info("Please enter one or more tickers in the sidebar.")
+        st.info("Select a basket or enter tickers in the sidebar to load data.")
 
 with tab_regime:
     st.header("Macro Regime Insights")
@@ -1168,7 +1298,7 @@ with tab_ownership:
         except Exception as e:
             st.error(f"Error fetching SEC data: {e}")
     else:
-        st.info("Please enter one or more tickers in the sidebar.")
+        st.info("Select a basket or enter tickers in the sidebar to load data.")
 
 with tab_earnings:
     st.header("Earnings Highlights")
@@ -1245,7 +1375,7 @@ with tab_earnings:
             if links:
                 st.markdown(" | ".join(links))
     else:
-        st.info("Please enter one or more tickers in the sidebar.")
+        st.info("Select a basket or enter tickers in the sidebar to load data.")
 
 with tab_glossary:
     st.header("Guide & Glossary")
