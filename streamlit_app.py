@@ -10,6 +10,9 @@ import altair as alt
 import requests
 from sec_api import QueryApi, ExtractorApi
 
+SANCTIONED_TICKERS = {"RSX", "RSXJ", "YNDX", "POLY", "OGZPY"}
+HALTED_TICKERS = {"RSX"}
+
 st.set_page_config(layout="wide")
 st.title("📊 Custom Stock Fundamentals Explorer")
 
@@ -31,7 +34,20 @@ def load_baskets(path="baskets.json"):
             return json.load(f)
     return {}
 
+
+def map_ticker_memberships(data: dict[str, list[str]]) -> dict[str, list[str]]:
+    membership: dict[str, set[str]] = {}
+    for basket, symbols in data.items():
+        for symbol in symbols:
+            key = symbol.upper()
+            if key not in membership:
+                membership[key] = set()
+            membership[key].add(basket)
+    return {ticker: sorted(groups) for ticker, groups in membership.items()}
+
+
 baskets = load_baskets()
+ticker_memberships = map_ticker_memberships(baskets)
 basket_names = list(baskets.keys())
 basket_names.insert(0, "Custom")
 basket_names.insert(1, "All Baskets")
@@ -86,12 +102,44 @@ CATEGORY_BY_METRIC = {
     "% Below 52W High": "Price/Volume", "Avg Vol (10d)": "Price/Volume", "Avg Vol (3m)": "Price/Volume",
     "Market Cap": "Size",
     "Company Name": "Profile",
-    "P/E (TTM)": "Valuation", "P/B": "Valuation", "Dividend Yield %": "Valuation",
+    "Sector": "Profile",
+    "Industry": "Profile",
+    "Security Type": "Profile",
+    "Basket": "Profile",
+    "P/E (TTM)": "Valuation", "Forward P/E": "Valuation", "PEG Ratio": "Valuation",
+    "P/B": "Valuation", "EV/Sales": "Valuation", "Dividend Yield %": "Valuation",
     "Net Profit Margin %": "Profitability", "ROE %": "Profitability",
     "Current Ratio": "Liquidity", "Quick Ratio": "Liquidity",
     "Debt/Equity (pct)": "Leverage", "Interest Coverage": "Leverage",
+    "Operating CF / Debt": "Cash Flow", "Free Cash Flow Margin %": "Cash Flow",
+    "Float %": "Sentiment", "Analyst Upside %": "Sentiment", "Earnings Surprise %": "Sentiment",
+    "Volume Surge Ratio": "Sentiment",
     "Asset Turnover": "Efficiency", "Inventory Turnover": "Efficiency",
-    "Revenue YoY %": "Growth", "Earnings YoY %": "Growth",
+    "Investment Profile": "Investment View",
+    "Investment Score": "Investment View",
+    "Max Upside Label": "Investment View",
+    "Max Upside Score": "Investment View",
+    "Revenue YoY % (Recent)": "Revenue Growth",
+    "Revenue YoY % (1Y Ago)": "Revenue Growth",
+    "Revenue YoY % (2Y Ago)": "Revenue Growth",
+    "Earnings YoY % (Recent)": "Earnings Growth",
+    "Earnings YoY % (1Y Ago)": "Earnings Growth",
+    "Earnings YoY % (2Y Ago)": "Earnings Growth",
+    "Momentum 3M %": "Momentum", "Momentum 6M %": "Momentum", "Momentum 12M %": "Momentum",
+    "Volatility 3M %": "Momentum", "Volatility 6M %": "Momentum",
+    "Short % of Float": "Short Interest", "Days to Cover (Short)": "Short Interest",
+    "Short Interest % Change": "Short Interest",
+}
+
+OPTIONAL_METRICS = {
+    "Sector",
+    "Industry",
+    "Float %",
+    "Analyst Upside %",
+    "Earnings Surprise %",
+    "Volume Surge Ratio",
+    "Volatility 3M %",
+    "Volatility 6M %",
 }
 
 COLUMNS = ["Ticker"] + list(CATEGORY_BY_METRIC.keys())
@@ -112,6 +160,21 @@ METRIC_GUIDE = {
         "good": "2-5% for stable payers.",
         "caution": ">8% could be unsustainable.",
     },
+    "Forward P/E": {
+        "summary": "Price paid for next year's expected earnings.",
+        "good": "<20 for mature firms; <30 for growth names.",
+        "caution": ">40 indicates rich expectations.",
+    },
+    "PEG Ratio": {
+        "summary": "Forward P/E divided by growth; <1 is considered attractive.",
+        "good": "0.7-1.0 suggests growth is fairly priced.",
+        "caution": ">1.5 implies growth may be overpaid.",
+    },
+    "EV/Sales": {
+        "summary": "Enterprise value relative to trailing revenue.",
+        "good": "<5 for most sectors; software and biotech can run higher.",
+        "caution": ">10 demands stellar execution.",
+    },
     "Market Cap": {
         "summary": "Company size measured by market capitalization (shares outstanding × price).",
         "good": "Match to your risk tolerance: mega caps provide stability; smaller caps can be volatile.",
@@ -126,6 +189,77 @@ METRIC_GUIDE = {
         "summary": "Percent of revenue kept as profit.",
         "good": ">10% is solid for most industries.",
         "caution": "Negative margins highlight losses.",
+    },
+    "Operating CF / Debt": {
+        "summary": "How many dollars of operating cash flow are generated per dollar of total debt.",
+        "good": ">0.3 shows healthy coverage.",
+        "caution": "<0.1 means debt could strain cash flow.",
+    },
+    "Free Cash Flow Margin %": {
+        "summary": "Free cash flow as a percent of revenue.",
+        "good": ">5% indicates ample self-funding.",
+        "caution": "Negative FCF margin signals heavy burn or investment.",
+    },
+    "Investment Profile": {
+        "summary": "Heuristic label summarizing valuation, growth, quality, and risk scores.",
+    },
+    "Investment Score": {
+        "summary": "Weighted 0-1 score combining valuation, profitability, growth, health, and sentiment (higher is better).",
+        "good": ">=0.7 indicates attractive risk/reward.",
+        "caution": "<0.4 signals elevated risk or weak fundamentals.",
+    },
+    "Max Upside Label": {
+        "summary": "Narrative tag for upside-focused screening (momentum, growth, squeeze potential).",
+    },
+    "Max Upside Score": {
+        "summary": "Upside-oriented 0-1 score weighted toward growth, momentum, and squeeze factors.",
+        "good": ">=0.6 highlights strong upside setup.",
+        "caution": "<0.3 warns of weak trend/upside.",
+    },
+    "Float %": {
+        "summary": "Public float divided by shares outstanding (lower float amplifies moves).",
+        "good": "<60% keeps supply tight.",
+        "caution": ">80% reduces squeeze potential.",
+    },
+    "Analyst Upside %": {
+        "summary": "Consensus target price upside relative to current price.",
+        "good": ">15% suggests analyst-implied upside.",
+        "caution": "<0% signals targets below price.",
+    },
+    "Earnings Surprise %": {
+        "summary": "Most recent quarterly earnings surprise percentage.",
+        "good": ">5% beats highlight positive catalysts.",
+        "caution": "<-5% misses can weigh on shares.",
+    },
+    "Volume Surge Ratio": {
+        "summary": "Current day volume vs. 10-day average.",
+        "good": ">1.5 indicates accumulation.",
+        "caution": "<0.5 hints at fading interest.",
+    },
+    "Volatility 3M %": {
+        "summary": "Annualized standard deviation of daily returns over ~3 months.",
+        "good": "20-40% reflects tradable volatility.",
+        "caution": "<15% may limit asymmetry; >80% can be chaotic.",
+    },
+    "Volatility 6M %": {
+        "summary": "Annualized standard deviation over ~6 months.",
+        "good": "20-35% balances trend and volatility.",
+        "caution": "<15% sleepy; >70% very erratic.",
+    },
+    "Momentum 3M %": {
+        "summary": "Price change over roughly three months.",
+        "good": ">=10% indicates positive momentum.",
+        "caution": "<-10% suggests the trend is down.",
+    },
+    "Momentum 6M %": {
+        "summary": "Price change over six months.",
+        "good": ">=15% shows sustained strength.",
+        "caution": "<-15% highlights prolonged weakness.",
+    },
+    "Momentum 12M %": {
+        "summary": "Price change over twelve months.",
+        "good": ">=20% aligns with long-term winners.",
+        "caution": "<-20% often reflects structural issues.",
     },
     "Debt/Equity (pct)": {
         "summary": "Financial leverage vs equity base.",
@@ -146,15 +280,50 @@ METRIC_GUIDE = {
         "good": "0-15% shows momentum.",
         "caution": ">30% may signal drawdown or opportunity.",
     },
-    "Revenue YoY %": {
-        "summary": "Annual revenue growth rate.",
-        "good": ">10% = strong growth.",
-        "caution": "Negative growth warrants investigation.",
+    "Short % of Float": {
+        "summary": "Portion of tradable shares sold short.",
+        "good": "<5% keeps bearish pressure modest.",
+        "caution": ">15% signals elevated squeeze/negative sentiment risk.",
     },
-    "Earnings YoY %": {
-        "summary": "Annual net income growth.",
-        "good": ">10% suggests expanding profitability.",
-        "caution": "Declines flag earnings pressure.",
+    "Days to Cover (Short)": {
+        "summary": "Trading days shorts need to buy back based on typical volume.",
+        "good": "<2 suggests exits are easy.",
+        "caution": ">5 can make squeezes more likely.",
+    },
+    "Short Interest % Change": {
+        "summary": "Percent change in short interest vs. prior report.",
+        "good": "<=0 shows shorts steady or covering.",
+        "caution": ">10% jump indicates fast building bearish bets.",
+    },
+    "Revenue YoY % (Recent)": {
+        "summary": "Latest annual revenue growth compared to prior fiscal year.",
+        "good": ">=10% signals healthy top-line expansion.",
+        "caution": "<=0% indicates shrinking sales.",
+    },
+    "Revenue YoY % (1Y Ago)": {
+        "summary": "Revenue growth from one fiscal year earlier.",
+        "good": ">=10% shows sustained momentum.",
+        "caution": "<=0% highlights a down year.",
+    },
+    "Revenue YoY % (2Y Ago)": {
+        "summary": "Revenue growth two fiscal periods back.",
+        "good": ">=10% keeps trend intact.",
+        "caution": "<=0% points to earlier contraction.",
+    },
+    "Earnings YoY % (Recent)": {
+        "summary": "Latest annual net income growth versus prior year.",
+        "good": ">=10% suggests earnings acceleration.",
+        "caution": "<=0% warns of profit declines.",
+    },
+    "Earnings YoY % (1Y Ago)": {
+        "summary": "Net income growth from one fiscal year earlier.",
+        "good": ">=10% reflects durable profit gains.",
+        "caution": "<=0% indicates earlier weakness.",
+    },
+    "Earnings YoY % (2Y Ago)": {
+        "summary": "Net income growth two fiscal periods back.",
+        "good": ">=10% shows multi-year strength.",
+        "caution": "<=0% marks past profit pressure.",
     },
 }
 
@@ -313,6 +482,286 @@ def parse_display_number(value) -> float | None:
         return None
 
 
+def format_int_with_commas(value) -> str:
+    """Format large integers with comma separators while handling missing values."""
+    if value in [None, "", "None"]:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except TypeError:
+        pass
+    try:
+        return f"{int(float(value)):,}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _to_float(value) -> float | None:
+    if value in [None, "", "None"]:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return None if pd.isna(value) else float(value)
+        except TypeError:
+            return None
+    try:
+        text = str(value).replace(",", "").strip()
+        if not text:
+            return None
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _score_linear(value, low: float, high: float) -> float | None:
+    val = _to_float(value)
+    if val is None:
+        return None
+    if val <= low:
+        return 0.0
+    if val >= high:
+        return 1.0
+    return (val - low) / (high - low)
+
+
+def _score_inverse(value, low: float, high: float) -> float | None:
+    val = _to_float(value)
+    if val is None:
+        return None
+    if val <= low:
+        return 1.0
+    if val >= high:
+        return 0.0
+    return 1.0 - (val - low) / (high - low)
+
+
+def _average_scores(scores: list[float | None]) -> float | None:
+    valid = [s for s in scores if s is not None]
+    if not valid:
+        return None
+    return float(sum(valid) / len(valid))
+
+
+def _score_with_default(score: float | None, default: float = 0.5) -> float:
+    return float(score) if score is not None else default
+
+
+def _missing_penalty(scores: dict[str, float | None], required: int = 3, penalty: float = 0.15) -> float:
+    available = sum(1 for value in scores.values() if value is not None)
+    if available >= required:
+        return 0.0
+    shortfall = required - available
+    return penalty * shortfall
+
+
+def _weighted_score(scores: dict[str, float | None], weights: dict[str, float]) -> float:
+    total = 0.0
+    weight_sum = 0.0
+    for key, weight in weights.items():
+        value = scores.get(key)
+        if value is None:
+            continue
+        total += value * weight
+        weight_sum += weight
+    if weight_sum == 0:
+        return 0.0
+    return total / weight_sum
+
+
+def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
+
+
+INVESTMENT_PROFILE_DEFINITIONS = {
+    "Great Value": "Discount valuation with solid profitability and balance sheet support.",
+    "Quality Compounder": "High returns on capital, resilient margins, and healthy leverage.",
+    "High-Growth Disruptor": "Rapid revenue/earnings expansion with acceptable profitability traction.",
+    "Turnaround Value": "Cheap stock showing early improvement after a weak growth spell.",
+    "Cash-Cow Defensive": "Mature, cash-generative name with fortress balance sheet and modest growth.",
+    "Speculative Story": "Growth runway present but profitability or balance sheet remains fragile.",
+    "Avoid – Too Hot": "Rich valuation with shaky fundamentals or bearish positioning—manage exposure.",
+    "Avoid – Weak Financials": "Balance sheet stress or profitability gaps make this one high risk.",
+    "Avoid – Data Gaps": "Insufficient or stale fundamentals; requires deeper research before acting.",
+    "Avoid – Flagged": "External factors (sanctions, halts, illiquidity) make this uninvestable for now.",
+    "Neutral Watchlist": "Mixed signals; fundamentals do not strongly favor any single profile.",
+}
+
+
+def compute_investment_profile(metrics: dict[str, object]) -> tuple[str, dict[str, float | None], float]:
+    valuation_components = [
+        _score_inverse(metrics.get("pe"), 15, 40),
+        _score_inverse(metrics.get("forward_pe"), 18, 45),
+        _score_inverse(metrics.get("peg_ratio"), 0.8, 2.0),
+        _score_inverse(metrics.get("pb"), 1.5, 6.0),
+        _score_inverse(metrics.get("ev_sales"), 3.0, 10.0),
+        _score_inverse(metrics.get("sector_relative"), 0.8, 1.4),
+        _score_linear(metrics.get("dividend_yield"), 0.0, 3.5),
+    ]
+    valuation_score = _average_scores(valuation_components)
+
+    profitability_components = [
+        _score_linear(metrics.get("net_margin"), 0.0, 15.0),
+        _score_linear(metrics.get("roe"), 5.0, 20.0),
+        _score_linear(metrics.get("interest_coverage"), 1.0, 8.0),
+        _score_linear(metrics.get("fcf_margin"), 0.0, 12.0),
+    ]
+    profitability_score = _average_scores(profitability_components)
+
+    growth_components = [
+        _score_linear(metrics.get("revenue_yoy"), 0.0, 20.0),
+        _score_linear(metrics.get("earnings_yoy"), 0.0, 20.0),
+        _score_linear(metrics.get("growth_trend"), -10.0, 15.0),
+    ]
+    growth_score = _average_scores(growth_components)
+
+    health_components = [
+        _score_linear(metrics.get("current_ratio"), 1.0, 2.5),
+        _score_inverse(metrics.get("debt_to_equity"), 50.0, 200.0),
+        _score_linear(metrics.get("ocf_to_debt"), 0.1, 0.6),
+    ]
+    health_score = _average_scores(health_components)
+
+    sentiment_components = [
+        _score_inverse(metrics.get("short_float_pct"), 5.0, 20.0),
+        _score_inverse(metrics.get("pct_below_high"), 5.0, 40.0),
+        _score_linear(metrics.get("volume_score"), 0.5, 2.0),
+        _score_linear(metrics.get("momentum_6m"), -15.0, 25.0),
+    ]
+    sentiment_score = _average_scores(sentiment_components)
+
+    scores = {
+        "valuation": valuation_score,
+        "profitability": profitability_score,
+        "growth": growth_score,
+        "health": health_score,
+        "sentiment": sentiment_score,
+    }
+
+    v = _score_with_default(valuation_score)
+    p = _score_with_default(profitability_score)
+    g = _score_with_default(growth_score)
+    h = _score_with_default(health_score)
+    s = _score_with_default(sentiment_score)
+
+    overall_score = _weighted_score(scores, {
+        "valuation": 0.2,
+        "profitability": 0.25,
+        "growth": 0.25,
+        "health": 0.2,
+        "sentiment": 0.1,
+    })
+
+    overall_score = _clamp(overall_score - _missing_penalty(scores, required=3, penalty=0.15))
+
+    if metrics.get("avoid_flag"):
+        return "Avoid – Flagged", scores, _clamp(overall_score * 0.4)
+    if metrics.get("data_gaps"):
+        overall_score *= 0.7
+    if metrics.get("is_fund"):
+        overall_score *= 0.85
+
+    if v < 0.3 and s < 0.3 and (p < 0.4 or g < 0.3):
+        return "Avoid – Too Hot", scores, overall_score * 0.6
+    if h < 0.3 or (p < 0.25 and g < 0.2):
+        return "Avoid – Weak Financials", scores, overall_score * 0.5
+    if g >= 0.5 and (p < 0.4 or h < 0.4):
+        return "Speculative Story", scores, overall_score * 0.85
+    if p >= 0.7 and g < 0.4 and s >= 0.45 and v >= 0.4:
+        return "Cash-Cow Defensive", scores, overall_score
+    if g >= 0.7 and p >= 0.3:
+        bonus = 0.05 if s >= 0.6 else 0.0
+        return "High-Growth Disruptor", scores, _clamp(overall_score + bonus)
+    if p >= 0.75 and h >= 0.6 and g >= 0.4:
+        return "Quality Compounder", scores, overall_score
+    if v >= 0.7 and p >= 0.5 and h >= 0.45 and g >= 0.3:
+        return "Great Value", scores, overall_score
+    if v >= 0.6 and g < 0.3 and p >= 0.4:
+        return "Turnaround Value", scores, overall_score
+
+    return "Neutral Watchlist", scores, overall_score
+
+
+def compute_max_upside_score(metrics: dict[str, object]) -> tuple[str, float]:
+    growth_components = [
+        _score_linear(metrics.get("revenue_yoy"), -5.0, 25.0),
+        _score_linear(metrics.get("earnings_yoy"), -5.0, 25.0),
+        _score_linear(metrics.get("growth_trend"), -10.0, 15.0),
+    ]
+    growth_score = _average_scores(growth_components)
+
+    drawdown_components = [
+        _score_linear(metrics.get("pct_below_high"), 15.0, 50.0),
+        _score_linear(metrics.get("momentum_3m"), -5.0, 25.0),
+        _score_linear(metrics.get("momentum_6m"), -10.0, 35.0),
+        _score_linear(metrics.get("momentum_12m"), -15.0, 45.0),
+    ]
+    drawdown_score = _average_scores(drawdown_components)
+
+    squeeze_components = [
+        _score_linear(metrics.get("short_interest_pct"), 6.0, 25.0),
+        _score_inverse(metrics.get("float_pct"), 30.0, 80.0),
+        _score_linear(metrics.get("volume_score"), 1.0, 3.0),
+    ]
+    squeeze_score = _average_scores(squeeze_components)
+
+    catalyst_components = [
+        _score_linear(metrics.get("earnings_surprise"), 0.0, 10.0),
+        _score_linear(metrics.get("analyst_upside"), 0.0, 25.0),
+    ]
+    catalyst_score = _average_scores(catalyst_components)
+
+    volatility_components = [
+        _score_linear(metrics.get("volatility_3m"), 20.0, 70.0),
+        _score_linear(metrics.get("volatility_6m"), 20.0, 60.0),
+    ]
+    volatility_score = _average_scores(volatility_components)
+
+    upside_scores = {
+        "growth": growth_score,
+        "drawdown": drawdown_score,
+        "squeeze": squeeze_score,
+        "catalyst": catalyst_score,
+        "volatility": volatility_score,
+    }
+
+    base_score = _weighted_score(upside_scores, {
+        "growth": 0.25,
+        "drawdown": 0.25,
+        "squeeze": 0.25,
+        "catalyst": 0.15,
+        "volatility": 0.10,
+    })
+
+    penalty = _missing_penalty(upside_scores, required=2, penalty=0.2)
+    base_score = _clamp(base_score - penalty)
+
+    market_cap = metrics.get("market_cap")
+    if market_cap and market_cap > 0:
+        try:
+            size_adj = (75_000_000_000.0 / float(market_cap)) ** 0.3
+            base_score *= _clamp(size_adj, 0.55, 1.3)
+        except Exception:
+            pass
+
+    if metrics.get("is_fund"):
+        base_score *= 0.8
+    if metrics.get("data_gaps"):
+        base_score *= 0.7
+    if metrics.get("avoid_flag"):
+        base_score *= 0.4
+
+    label = "Neutral"
+    if base_score >= 0.75:
+        label = "Breakout Candidate"
+    elif base_score >= 0.55:
+        label = "Upside Setup"
+    elif base_score <= 0.3:
+        label = "Avoid – Weak Trend"
+
+    return label, base_score
+
+
 @st.cache_data(show_spinner="Fetching price history…")
 def fetch_price_history(tickers, period="2y") -> pd.DataFrame:
     if not tickers:
@@ -433,6 +882,8 @@ def fetch_one(tk: str) -> dict:
     market_cap = info.get("marketCap")
     company_name = info.get("longName") or info.get("shortName") or info.get("name")
     pe_ttm = info.get("trailingPE")
+    forward_pe = info.get("forwardPE")
+    peg_ratio = info.get("pegRatio")
     pb = info.get("priceToBook")
     div_y = pct(info.get("dividendYield")) if info.get(
         "dividendYield") else None
@@ -440,6 +891,65 @@ def fetch_one(tk: str) -> dict:
         "returnOnEquity") else None
     net_margin = pct(info.get("profitMargins")) if info.get(
         "profitMargins") else None
+
+    enterprise_value = info.get("enterpriseValue")
+    total_revenue = info.get("totalRevenue") or info.get("totalRevenue")
+    free_cash_flow = info.get("freeCashflow")
+    operating_cash_flow = info.get("operatingCashflow")
+    total_debt = info.get("totalDebt")
+    float_shares = info.get("floatShares")
+    shares_outstanding = info.get("sharesOutstanding")
+    analyst_target = info.get("targetMeanPrice")
+    earnings_surprise = info.get("earningsQuarterlySurprisePercent")
+
+    ev_sales = None
+    if enterprise_value and total_revenue:
+        try:
+            ev_sales = enterprise_value / total_revenue if total_revenue else None
+        except Exception:
+            ev_sales = None
+
+    fcf_margin = None
+    if free_cash_flow and total_revenue:
+        try:
+            fcf_margin = pct(free_cash_flow / total_revenue)
+        except Exception:
+            fcf_margin = None
+
+    ocf_to_debt = None
+    if operating_cash_flow and total_debt:
+        try:
+            ocf_to_debt = operating_cash_flow / total_debt if total_debt else None
+        except Exception:
+            ocf_to_debt = None
+
+    float_pct = None
+    if float_shares and shares_outstanding:
+        try:
+            float_pct = pct(float_shares / shares_outstanding)
+        except Exception:
+            float_pct = None
+
+    analyst_upside = None
+    if analyst_target and current_price:
+        try:
+            analyst_upside = pct((analyst_target - current_price) / current_price)
+        except Exception:
+            analyst_upside = None
+
+    short_float_pct = pct(info.get("shortPercentOfFloat")) if info.get(
+        "shortPercentOfFloat") else None
+    days_to_cover = info.get("shortRatio")
+    shares_short = info.get("sharesShort")
+    shares_short_prev = info.get("sharesShortPriorMonth") or info.get("sharesShortPreviousMonth")
+    short_interest_change = None
+    if shares_short and shares_short_prev:
+        try:
+            if shares_short_prev:
+                change_ratio = (shares_short - shares_short_prev) / shares_short_prev
+                short_interest_change = pct(change_ratio)
+        except Exception:
+            short_interest_change = None
 
     # Liquidity
     curr_assets = curr_liabs = None
@@ -521,22 +1031,41 @@ def fetch_one(tk: str) -> dict:
     inv_turn = safe_div(
         cogs, avg_inventory) if cogs and avg_inventory else None
 
-    # Growth
-    rev_yoy = earn_yoy = None
-    if is_a is not None and not is_a.empty:
-        cols = list(is_a.columns)
-        if len(cols) >= 2:
-            if "Total Revenue" in is_a.index:
-                r0, r1 = is_a.at["Total Revenue", cols[0]
-                                 ], is_a.at["Total Revenue", cols[1]]
-                rev_yoy = pct((r0 - r1) / r1) if r1 else None
-            if "Net Income" in is_a.index:
-                e0, e1 = is_a.at["Net Income", cols[0]
-                                 ], is_a.at["Net Income", cols[1]]
-                earn_yoy = pct((e0 - e1) / e1) if e1 else None
+    def compute_yoy_series(frame: pd.DataFrame | None, line_item: str, max_periods: int = 3) -> list[float | None]:
+        if frame is None or frame.empty or line_item not in frame.index:
+            return [None] * max_periods
+        cols = list(frame.columns)
+        values: list[float | None] = []
+        for col in cols:
+            try:
+                val = frame.at[line_item, col]
+            except Exception:
+                val = None
+            if isinstance(val, (int, float)) and not pd.isna(val):
+                values.append(float(val))
+            else:
+                values.append(None)
+        yoy: list[float | None] = []
+        for current, previous in zip(values, values[1:]):
+            if previous in (None, 0) or current is None:
+                yoy.append(None)
+            else:
+                try:
+                    yoy.append(pct((current - previous) / previous))
+                except Exception:
+                    yoy.append(None)
+            if len(yoy) == max_periods:
+                break
+        while len(yoy) < max_periods:
+            yoy.append(None)
+        return yoy
+
+    revenue_growth_series = compute_yoy_series(is_a, "Total Revenue")
+    earnings_growth_series = compute_yoy_series(is_a, "Net Income")
 
     return {
         "Ticker": tk,
+        "Security Type": "Fund" if info.get("quoteType") in {"ETF", "MUTUALFUND", "INDEX", "FUND", "CLOSEDEND"} else "Stock",
         "Current Price": current_price,
         "52W High": high52,
         "52W Low": low52,
@@ -545,8 +1074,13 @@ def fetch_one(tk: str) -> dict:
         "Avg Vol (3m)": avg3m,
         "Market Cap": market_cap,
         "Company Name": company_name,
+        "Sector": info.get("sector"),
+        "Industry": info.get("industry"),
         "P/E (TTM)": pe_ttm,
+        "Forward P/E": forward_pe,
         "P/B": pb,
+        "PEG Ratio": peg_ratio,
+        "EV/Sales": ev_sales,
         "Dividend Yield %": div_y,
         "Net Profit Margin %": net_margin,
         "ROE %": roe,
@@ -554,10 +1088,34 @@ def fetch_one(tk: str) -> dict:
         "Quick Ratio": quick_ratio,
         "Debt/Equity (pct)": debt_to_equity_pct,
         "Interest Coverage": interest_coverage,
+        "Operating CF / Debt": ocf_to_debt,
+        "Free Cash Flow Margin %": fcf_margin,
+        "Float %": float_pct,
+        "Analyst Upside %": analyst_upside,
+        "Earnings Surprise %": earnings_surprise,
         "Asset Turnover": asset_turnover,
         "Inventory Turnover": inv_turn,
-        "Revenue YoY %": rev_yoy,
-        "Earnings YoY %": earn_yoy,
+        "Investment Profile": None,
+        "Investment Score": None,
+        "Max Upside Label": None,
+        "Max Upside Score": None,
+        "Revenue YoY % (Recent)": revenue_growth_series[0],
+        "Revenue YoY % (1Y Ago)": revenue_growth_series[1],
+        "Revenue YoY % (2Y Ago)": revenue_growth_series[2],
+        "Earnings YoY % (Recent)": earnings_growth_series[0],
+        "Earnings YoY % (1Y Ago)": earnings_growth_series[1],
+        "Earnings YoY % (2Y Ago)": earnings_growth_series[2],
+        "Short % of Float": short_float_pct,
+        "Days to Cover (Short)": days_to_cover,
+        "Short Interest % Change": short_interest_change,
+        "Momentum 3M %": None,
+        "Momentum 6M %": None,
+        "Momentum 12M %": None,
+        "Volatility 3M %": None,
+        "Volatility 6M %": None,
+        "Volume Surge Ratio": None,
+        "Regular Volume": info.get("regularMarketVolume"),
+        "Avg Volume 10d": info.get("averageDailyVolume10Day"),
     }
 
 
@@ -575,6 +1133,9 @@ with st.sidebar.expander("ℹ️ What do these metrics mean?", expanded=False):
     - *Formula:* Price per share / Earnings per share (TTM)
     - *Interpretation:* 10–20 is typical; lower may mean undervalued, higher (>30) may mean overvalued or high growth expectations.
     - *Example:* P/E of 15 means investors pay $15 for every $1 of earnings.
+- **Forward P/E**: Price / Next 12 months’ expected earnings. Useful for growth names where trailing earnings are noisy.
+- **PEG Ratio**: Forward P/E divided by expected growth. Values near 1 are fairly priced; far above 1 suggests expensive growth.
+- **EV/Sales**: Enterprise value / trailing revenue. Handy for unprofitable companies; compare against peers.
 - **P/B**: Price-to-Book ratio
     - *Formula:* Price per share / Book value per share
     - *Interpretation:* <1 may mean undervalued; 1–3 is typical; >3 may mean overvalued or lots of intangible assets.
@@ -591,6 +1152,8 @@ with st.sidebar.expander("ℹ️ What do these metrics mean?", expanded=False):
 - **ROE %**: Return on equity
     - *Formula:* Net income / Shareholder equity × 100
     - *Interpretation:* >10% is considered good; very high ROE can mean high leverage.
+- **Operating CF / Debt**: Operating cash flow divided by total debt. >0.3 signals solid coverage.
+- **Free Cash Flow Margin %**: FCF / Revenue. Positive values indicate self-funded growth.
 
 **Liquidity**
 - **Current Ratio**: Current assets / Current liabilities
@@ -611,11 +1174,21 @@ with st.sidebar.expander("ℹ️ What do these metrics mean?", expanded=False):
 - **Inventory Turnover**: Cost of goods sold / Average inventory
     - *Interpretation:* Higher is better; >5 is good for most industries.
 
-**Growth**
-- **Revenue YoY %**: Year-over-year revenue growth
-    - *Interpretation:* Positive growth is good; >10% is strong for established companies.
-- **Earnings YoY %**: Year-over-year earnings growth
-    - *Interpretation:* Positive growth is good; >10% is strong.
+**Short Interest**
+- **Short % of Float**: Portion of tradable shares sold short. Lower (<5%) signals light bearish positioning; high values (>15%) can amplify squeeze risk.
+- **Days to Cover (Short)**: Short interest divided by average daily volume. Lower (<2) means shorts can exit quickly; higher (>5) means potential squeeze fuel.
+- **Short Interest % Change**: Percentage change in short interest since the prior report. Flat or negative implies covering; sharp increases (>10%) mean bearish bets are ramping up.
+
+**Revenue Growth**
+- **Revenue YoY % (Recent)**: Most recent fiscal YoY revenue change. >10% is strong; negative values flag contraction.
+- **Revenue YoY % (1Y/2Y Ago)**: Prior-year YoY revenue changes to gauge trend persistence.
+
+**Earnings Growth**
+- **Earnings YoY % (Recent)**: Latest fiscal YoY earnings change. >10% indicates expanding profits.
+- **Earnings YoY % (1Y/2Y Ago)**: Earlier YoY earnings changes to spot multi-year acceleration or declines.
+
+**Momentum**
+- **Momentum 3M % / 6M % / 12M %**: Price performance over the stated window. Positive readings support upside setups; deep negatives flag weak trends.
     """)
 st.sidebar.header("Configuration")
 basket_choice = st.sidebar.selectbox(
@@ -649,12 +1222,32 @@ all_categories = sorted(set(CATEGORY_BY_METRIC.values()))
 selected_categories = st.sidebar.multiselect(
     "Select categories to display", options=all_categories, default=all_categories)
 filtered_metrics = [m for m in all_metrics if CATEGORY_BY_METRIC[m] in selected_categories]
-default_metrics = [m for m in filtered_metrics if m != "Company Name"]
+exclude_for_default = {"Company Name", "Basket"} | OPTIONAL_METRICS
+default_metrics = [m for m in filtered_metrics if m not in exclude_for_default]
 if not default_metrics:
     default_metrics = filtered_metrics
 selected_metrics = st.sidebar.multiselect(
     "Select metrics to display", options=filtered_metrics, default=default_metrics)
-columns_to_show = ["Ticker"] + selected_metrics
+
+priority_columns = [
+    "Market Cap",
+    "Security Type",
+    "Basket",
+    "Investment Profile",
+    "Investment Score",
+    "Max Upside Label",
+    "Max Upside Score",
+]
+
+ordered_metrics = []
+for col in priority_columns:
+    if col in selected_metrics and col not in ordered_metrics:
+        ordered_metrics.append(col)
+for col in selected_metrics:
+    if col not in ordered_metrics:
+        ordered_metrics.append(col)
+
+columns_to_show = ["Ticker"] + ordered_metrics
 
 # Fetch & display
 
@@ -673,7 +1266,210 @@ with tab_fundamentals:
         )
     if tickers:
         data = [fetch_one(tk) for tk in tickers]
-        df = pd.DataFrame(data, columns=COLUMNS)
+        df = pd.DataFrame(data)
+
+        if "Basket" not in df.columns:
+            df["Basket"] = ""
+
+        price_history = fetch_price_history(tickers)
+        if price_history is not None and not price_history.empty:
+            price_history = price_history.sort_index()
+
+            def _compute_return(series: pd.Series, periods: int) -> float | None:
+                series = series.dropna()
+                if len(series) < periods + 1 or periods <= 0:
+                    return None
+                try:
+                    base = series.iloc[-periods - 1]
+                    latest = series.iloc[-1]
+                    if base == 0:
+                        return None
+                    return pct((latest / base) - 1.0)
+                except Exception:
+                    return None
+
+            def _compute_volatility(series: pd.Series, periods: int) -> float | None:
+                returns = series.pct_change().dropna()
+                if len(returns) < periods or periods <= 1:
+                    return None
+                sample = returns.iloc[-periods:]
+                std = sample.std()
+                if pd.isna(std):
+                    return None
+                annualized = std * (252 ** 0.5)
+                return pct(annualized)
+
+            lookbacks = {
+                "Momentum 3M %": 63,
+                "Momentum 6M %": 126,
+                "Momentum 12M %": 252,
+            }
+            for label, periods in lookbacks.items():
+                for tk in price_history.columns:
+                    series = price_history[tk]
+                    df.loc[df["Ticker"] == tk, label] = _compute_return(series, periods)
+
+            volatility_windows = {
+                "Volatility 3M %": 63,
+                "Volatility 6M %": 126,
+            }
+            for label, periods in volatility_windows.items():
+                for tk in price_history.columns:
+                    series = price_history[tk]
+                    df.loc[df["Ticker"] == tk, label] = _compute_volatility(series, periods)
+
+        sector_context: dict[str | None, dict[str, float]] = {}
+        if "Sector" in df.columns:
+            for sector, group in df.groupby("Sector"):
+                if not sector or group.empty:
+                    continue
+                sector_context[sector] = {
+                    "pe": group["P/E (TTM)"].apply(_to_float).dropna().mean() or 0.0,
+                    "forward_pe": group["Forward P/E"].apply(_to_float).dropna().mean() or 0.0,
+                    "revenue_growth": group["Revenue YoY % (Recent)"].apply(_to_float).dropna().mean() or 0.0,
+                }
+
+        for idx, row in df.iterrows():
+            ticker = str(row.get("Ticker", ""))
+            sector = row.get("Sector")
+            sector_stats = sector_context.get(sector) or {}
+
+            pe_val = _to_float(row.get("P/E (TTM)"))
+            forward_pe_val = _to_float(row.get("Forward P/E"))
+            peg_val = _to_float(row.get("PEG Ratio"))
+            pb_val = _to_float(row.get("P/B"))
+            ev_sales_val = _to_float(row.get("EV/Sales"))
+            div_yield_val = _to_float(row.get("Dividend Yield %"))
+            net_margin_val = _to_float(row.get("Net Profit Margin %"))
+            roe_val = _to_float(row.get("ROE %"))
+            ocf_to_debt_val = _to_float(row.get("Operating CF / Debt"))
+            fcf_margin_val = _to_float(row.get("Free Cash Flow Margin %"))
+            revenue_yoy_val = _to_float(row.get("Revenue YoY % (Recent)"))
+            earnings_yoy_val = _to_float(row.get("Earnings YoY % (Recent)"))
+            growth_trend_val = _to_float(row.get("Revenue YoY % (1Y Ago)"))
+            current_ratio_val = _to_float(row.get("Current Ratio"))
+            quick_ratio_val = _to_float(row.get("Quick Ratio"))
+            debt_to_equity_val = _to_float(row.get("Debt/Equity (pct)"))
+            interest_cov_val = _to_float(row.get("Interest Coverage"))
+            short_float_val = _to_float(row.get("Short % of Float"))
+            pct_below_high_val = _to_float(row.get("% Below 52W High"))
+            momentum_3m = _to_float(row.get("Momentum 3M %"))
+            momentum_6m = _to_float(row.get("Momentum 6M %"))
+            momentum_12m = _to_float(row.get("Momentum 12M %"))
+            volatility_3m = _to_float(row.get("Volatility 3M %"))
+            volatility_6m = _to_float(row.get("Volatility 6M %"))
+            float_pct_val = _to_float(row.get("Float %"))
+            analyst_upside_val = _to_float(row.get("Analyst Upside %"))
+            earnings_surprise_val = _to_float(row.get("Earnings Surprise %"))
+            market_cap_val = _to_float(row.get("Market Cap"))
+
+            avg_vol_10d = row.get("Avg Volume 10d")
+            regular_vol = row.get("Regular Volume")
+            volume_ratio = None
+            try:
+                if avg_vol_10d and regular_vol:
+                    avg_vol = float(avg_vol_10d)
+                    if avg_vol > 0:
+                        volume_ratio = float(regular_vol) / avg_vol
+            except Exception:
+                volume_ratio = None
+            if volume_ratio is not None:
+                df.at[idx, "Volume Surge Ratio"] = volume_ratio
+
+            sector_rel_valuation = None
+            if sector_stats.get("pe"):
+                base = sector_stats["pe"]
+                if base:
+                    sector_rel_valuation = pe_val / base if pe_val is not None else None
+
+            is_fund = str(row.get("Security Type", "")).lower() == "fund"
+            data_gaps = any(
+                metric is None for metric in [pe_val, pb_val, net_margin_val, roe_val, revenue_yoy_val, earnings_yoy_val]
+            )
+            avoid_flag = (
+                ticker.upper() in SANCTIONED_TICKERS
+                or ticker.upper() in HALTED_TICKERS
+                or (regular_vol is not None and regular_vol < 1000)
+            )
+
+            profile_label, _, investment_score = compute_investment_profile({
+                "pe": pe_val,
+                "forward_pe": forward_pe_val,
+                "peg_ratio": peg_val,
+                "pb": pb_val,
+                "ev_sales": ev_sales_val,
+                "dividend_yield": div_yield_val,
+                "net_margin": net_margin_val,
+                "roe": roe_val,
+                "interest_coverage": interest_cov_val,
+                "revenue_yoy": revenue_yoy_val,
+                "growth_trend": growth_trend_val,
+                "earnings_yoy": earnings_yoy_val,
+                "current_ratio": current_ratio_val,
+                "quick_ratio": quick_ratio_val,
+                "debt_to_equity": debt_to_equity_val,
+                "ocf_to_debt": ocf_to_debt_val,
+                "fcf_margin": fcf_margin_val,
+                "short_float_pct": short_float_val,
+                "pct_below_high": pct_below_high_val,
+                "volume_score": volume_ratio,
+                "momentum_6m": momentum_6m,
+                "sector_relative": sector_rel_valuation,
+                "volatility_3m": volatility_3m,
+                "float_pct": float_pct_val,
+                "analyst_upside": analyst_upside_val,
+                "earnings_surprise": earnings_surprise_val,
+                "market_cap": market_cap_val,
+                "data_gaps": data_gaps,
+                "is_fund": is_fund,
+                "avoid_flag": avoid_flag,
+            })
+
+            upside_label, upside_score = compute_max_upside_score({
+                "pe": pe_val,
+                "forward_pe": forward_pe_val,
+                "pb": pb_val,
+                "ev_sales": ev_sales_val,
+                "net_margin": net_margin_val,
+                "roe": roe_val,
+                "fcf_margin": fcf_margin_val,
+                "revenue_yoy": revenue_yoy_val,
+                "earnings_yoy": earnings_yoy_val,
+                "growth_trend": growth_trend_val,
+                "pct_below_high": pct_below_high_val,
+                "volume_score": volume_ratio,
+                "short_interest_pct": short_float_val,
+                "momentum_3m": momentum_3m,
+                "momentum_6m": momentum_6m,
+                "momentum_12m": momentum_12m,
+                "volatility_3m": volatility_3m,
+                "volatility_6m": volatility_6m,
+                "sector_relative": sector_rel_valuation,
+                "float_pct": float_pct_val,
+                "analyst_upside": analyst_upside_val,
+                "earnings_surprise": earnings_surprise_val,
+                "market_cap": market_cap_val,
+                "is_fund": is_fund,
+                "data_gaps": data_gaps,
+                "avoid_flag": avoid_flag or profile_label.startswith("Avoid"),
+            })
+
+            df.at[idx, "Investment Profile"] = profile_label
+            df.at[idx, "Investment Score"] = investment_score
+            df.at[idx, "Max Upside Label"] = upside_label
+            df.at[idx, "Max Upside Score"] = upside_score
+
+        if "Regular Volume" in df.columns:
+            df.drop(columns=["Regular Volume"], inplace=True, errors="ignore")
+        if "Avg Volume 10d" in df.columns:
+            df.drop(columns=["Avg Volume 10d"], inplace=True, errors="ignore")
+
+        if "Basket" in df.columns:
+            df["Basket"] = df["Ticker"].map(
+                lambda tk: ", ".join(ticker_memberships.get(str(tk).upper(), []))
+            )
+            if basket_choice not in (None, "Custom", "All Baskets"):
+                df["Basket"] = df["Basket"].replace("", basket_choice)
 
         with st.expander("Metric cheat sheet", expanded=False):
             rows = []
@@ -688,6 +1484,13 @@ with tab_fundamentals:
                 )
             st.markdown("\n".join(rows))
             st.caption("Values with a soft green highlight fall inside the healthy range noted above.")
+
+        with st.expander("Investment profile labels", expanded=False):
+            profile_lines = [
+                f"**{label}** — {desc}" for label, desc in INVESTMENT_PROFILE_DEFINITIONS.items()
+            ]
+            st.markdown("\n".join(profile_lines))
+            st.caption("Profiles are heuristic summaries blending valuation, growth, quality, balance sheet, and sentiment metrics.")
 
         # Filter columns based on user selection
         df = df[columns_to_show]
@@ -705,23 +1508,6 @@ with tab_fundamentals:
                 raw_val = df.at[idx, col]
                 strong = metric_is_strong(metric_name, raw_val)
                 strong_flags.at[idx, col] = strong
-                if metric_name in ["Avg Vol (10d)", "Avg Vol (3m)"]:
-                    try:
-                        formatted = (
-                            f"{int(float(raw_val)):,}"
-                            if raw_val not in [None, "None", "nan"]
-                            and str(raw_val).replace(",", "").replace(".", "").isdigit()
-                            else raw_val
-                        )
-                    except Exception:
-                        formatted = raw_val
-                elif metric_name == "Market Cap":
-                    formatted = format_market_cap(raw_val)
-                elif isinstance(raw_val, (int, float)) and not pd.isnull(raw_val):
-                    formatted = f"{raw_val:.2f}"
-                else:
-                    formatted = raw_val
-                df.at[idx, col] = formatted
 
         # Create MultiIndex columns: first row = categories, second = metric names
         metric_names = df.columns.tolist()
@@ -738,7 +1524,36 @@ with tab_fundamentals:
                 for col in df.columns
             ]
 
-        st.dataframe(df.style.apply(highlight_strong, axis=1), use_container_width=True)
+        formatters = {
+            "Market Cap": format_market_cap,
+            "Avg Vol (10d)": format_int_with_commas,
+            "Avg Vol (3m)": format_int_with_commas,
+            "Investment Score": lambda x: "" if x in [None, "", "None"] else f"{float(x):.2f}",
+            "Max Upside Score": lambda x: "" if x in [None, "", "None"] else f"{float(x):.2f}",
+            "Forward P/E": lambda x: "" if x in [None, "", "None"] else f"{float(x):.2f}",
+            "PEG Ratio": lambda x: "" if x in [None, "", "None"] else f"{float(x):.2f}",
+            "EV/Sales": lambda x: "" if x in [None, "", "None"] else f"{float(x):.2f}",
+            "Operating CF / Debt": lambda x: "" if x in [None, "", "None"] else f"{float(x):.2f}",
+            "Volume Surge Ratio": lambda x: "" if x in [None, "", "None"] else f"{float(x):.2f}",
+            "Float %": lambda x: "" if x in [None, "", "None"] else f"{float(x):.1f}",
+            "Analyst Upside %": lambda x: "" if x in [None, "", "None"] else f"{float(x):.1f}",
+            "Earnings Surprise %": lambda x: "" if x in [None, "", "None"] else f"{float(x):.1f}",
+            "Volatility 3M %": lambda x: "" if x in [None, "", "None"] else f"{float(x):.1f}",
+            "Volatility 6M %": lambda x: "" if x in [None, "", "None"] else f"{float(x):.1f}",
+        }
+        formatter_tuples = {
+            col: formatters[col[1]]
+            for col in df.columns
+            if col[1] in formatters
+        }
+
+        styled = (
+            df.style
+            .apply(highlight_strong, axis=1)
+            .format(formatter_tuples, na_rep="", precision=2)
+        )
+
+        st.dataframe(styled, use_container_width=True)
 
         # Bar chart visualization
         chart_options = [m for m in columns_to_show[1:] if m != "Company Name"]
