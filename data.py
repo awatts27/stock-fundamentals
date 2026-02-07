@@ -112,12 +112,14 @@ def fetch_fundamentals(ticker: str) -> dict:
         "earnings_growth": round(info.get("earningsGrowth", 0) * 100, 2) if info.get("earningsGrowth") else None,
         "debt_to_equity": round(de, 1) if de is not None else None,
         "current_ratio": info.get("currentRatio"),
+        "fcf": fcf,
         "fcf_margin": fcf_margin,
         "beta": info.get("beta"),
         "avg_volume": info.get("averageVolume"),
         "short_pct_float": round(info.get("shortPercentOfFloat", 0) * 100, 2) if info.get("shortPercentOfFloat") else None,
         "analyst_target": info.get("targetMeanPrice"),
         "analyst_upside": round((info.get("targetMeanPrice", 0) - current_price) / current_price * 100, 1) if current_price and info.get("targetMeanPrice") else None,
+        "held_pct_insiders": round(info.get("heldPercentInsiders", 0) * 100, 2) if info.get("heldPercentInsiders") else None,
         "is_etf": info.get("quoteType") in {"ETF", "MUTUALFUND", "INDEX"},
     }
 
@@ -162,3 +164,55 @@ def compute_drawdown_from_peak(prices: pd.DataFrame) -> pd.Series:
     last_price = prices.iloc[-1]
     last_peak = peaks.iloc[-1]
     return ((last_peak - last_price) / last_peak * 100).round(2)
+
+
+# ---------------------------------------------------------------------------
+# Dip context — is the dip market-wide, sector, or stock-specific?
+# ---------------------------------------------------------------------------
+
+def classify_dip(
+    prices: pd.DataFrame,
+    ticker: str,
+    basket_tickers: list[str],
+    lookback: int = 21,
+) -> str:
+    """Classify why a stock is down.
+
+    Returns one of:
+      'market'  — SPY is also down over the window (broad selloff)
+      'sector'  — majority of the basket is down (sector rotation)
+      'stock'   — only this stock is down (company-specific, most dangerous)
+    """
+    if len(prices) < lookback + 1:
+        return "unknown"
+
+    def _ret(col):
+        if col not in prices.columns:
+            return None
+        s = prices[col].dropna()
+        if len(s) < lookback + 1:
+            return None
+        return (s.iloc[-1] / s.iloc[-(lookback + 1)] - 1) * 100
+
+    spy_ret = _ret("SPY")
+    if spy_ret is not None and spy_ret < -3:
+        return "market"
+
+    basket_avail = [t for t in basket_tickers if t in prices.columns and t != ticker]
+    if basket_avail:
+        basket_rets = [_ret(t) for t in basket_avail]
+        basket_rets = [r for r in basket_rets if r is not None]
+        if basket_rets:
+            down_count = sum(1 for r in basket_rets if r < -3)
+            if down_count / len(basket_rets) > 0.5:
+                return "sector"
+
+    return "stock"
+
+
+DIP_LABELS = {
+    "market": "Market-wide dip",
+    "sector": "Sector dip",
+    "stock": "Stock-specific",
+    "unknown": "Unknown",
+}

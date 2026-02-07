@@ -1,27 +1,26 @@
-"""Stock Watchlist v2 — Buy-the-dip alert system for thematic baskets."""
+"""Stock Watchlist v2 — Buy-the-dip alert system.
+
+Philosophy: We can't beat Wall Street. We just want to find good businesses
+and buy them when they're cheap. The app does two things:
+  1. Filter out bad businesses (quality gate — all-or-nothing).
+  2. Tell us when the good ones pull back (price alert).
+"""
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import altair as alt
 
 from data import (
     load_baskets,
     all_tickers,
     fetch_price_history,
-    fetch_fundamentals,
     fetch_all_fundamentals,
-    compute_momentum,
-    compute_volatility,
-    compute_drawdown_from_peak,
+    classify_dip,
+    DIP_LABELS,
 )
-from quality import run_quality_gate, passes_quality, quality_summary
-from pullbacks import detect_pullbacks_multi_threshold
-from relative_strength import (
-    basket_returns,
-    basket_cumulative_returns,
-    vs_spy,
-)
+from quality import passes_quality, quality_summary, run_quality_gate, quality_failures
+from pullbacks import detect_pullbacks
+from relative_strength import basket_returns, basket_cumulative_returns
 
 
 # ---------------------------------------------------------------------------
@@ -40,25 +39,45 @@ def _fmt_cap(val) -> str:
     return f"${val:,.0f}"
 
 
+def _fmt_pct(val, suffix="%") -> str:
+    if val is None:
+        return "—"
+    return f"{val:+.1f}{suffix}" if val >= 0 else f"{val:.1f}{suffix}"
+
+
+def _fmt_cash(val) -> str:
+    if val is None:
+        return "—"
+    if val >= 1_000_000_000:
+        return f"${val / 1_000_000_000:.1f}B"
+    if val >= 1_000_000:
+        return f"${val / 1_000_000:.0f}M"
+    if val <= -1_000_000_000:
+        return f"-${abs(val) / 1_000_000_000:.1f}B"
+    if val <= -1_000_000:
+        return f"-${abs(val) / 1_000_000:.0f}M"
+    return f"${val:,.0f}"
+
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Stock Watchlist", layout="wide")
 st.title("Stock Watchlist")
-st.caption("Buy-the-dip alerts for your thematic baskets")
+st.caption("Good businesses on sale — nothing more, nothing less")
 
 # ---------------------------------------------------------------------------
-# Load data
+# Load baskets
 # ---------------------------------------------------------------------------
 baskets = load_baskets()
 if not baskets:
     st.error("No baskets.json found.")
     st.stop()
 
-tab_alerts, tab_baskets, tab_detail, tab_settings = st.tabs([
-    "Alerts",
-    "Basket Overview",
+tab_alerts, tab_detail, tab_baskets_overview, tab_baskets = st.tabs([
+    "On Sale",
     "Stock Detail",
+    "Basket Overview",
     "Baskets",
 ])
 
@@ -67,16 +86,12 @@ tab_alerts, tab_baskets, tab_detail, tab_settings = st.tabs([
 # ---------------------------------------------------------------------------
 st.sidebar.header("Settings")
 pullback_threshold = st.sidebar.slider(
-    "Pullback alert threshold %", 5, 50, 30, 5,
-    help="Alert when a stock drops this much from its rolling high",
+    "Pullback threshold %", 10, 50, 20, 5,
+    help="Show stocks that dropped at least this much from their rolling high",
 )
 lookback_days = st.sidebar.slider(
     "Lookback window (trading days)", 21, 126, 63, 21,
     help="How far back to look for the rolling high",
-)
-quality_min = st.sidebar.slider(
-    "Min quality gates to pass", 1, 5, 3,
-    help="Stocks must pass at least this many quality checks",
 )
 
 # Gather all unique tickers + SPY for benchmarking
@@ -88,99 +103,244 @@ with st.spinner("Loading market data..."):
     prices = fetch_price_history(fetch_list, period="1y")
     fundamentals_df = fetch_all_fundamentals(unique_tickers)
 
+
 # ---------------------------------------------------------------------------
-# TAB: Alerts
+# Helper: find which baskets a ticker belongs to
+# ---------------------------------------------------------------------------
+def _baskets_for(ticker: str) -> list[str]:
+    return [name for name, members in baskets.items() if ticker in members]
+
+
+# ---------------------------------------------------------------------------
+# TAB: On Sale
 # ---------------------------------------------------------------------------
 with tab_alerts:
-    st.header("Pullback Alerts")
+    st.header("On Sale")
     st.markdown(
-        f"Stocks in your baskets that have dropped **{pullback_threshold}%+** "
-        f"from their {lookback_days}-day rolling high — filtered by quality."
+        "Good businesses that have pulled back. Every stock here passes **all** "
+        "quality gates (profitable, cash-flow positive, growing revenue, "
+        "manageable debt, liquid, not a penny stock)."
     )
 
     if prices.empty:
         st.warning("No price data available.")
     else:
-        # Detect pullbacks across all basket tickers
-        basket_ticker_cols = [t for t in unique_tickers if t in prices.columns]
-        pullbacks = detect_pullbacks_multi_threshold(
-            prices[basket_ticker_cols],
-            thresholds=[pullback_threshold],
-            lookback_days=lookback_days,
-        )
+        # Step 1: quality filter — only stocks that pass ALL gates
+        quality_tickers = []
+        for _, row in fundamentals_df.iterrows():
+            if row.get("is_etf"):
+                continue
+            if passes_quality(row.to_dict()):
+                quality_tickers.append(row["ticker"])
 
-        if pullbacks.empty:
-            st.success("No pullback alerts right now. Your baskets are holding up.")
+        if not quality_tickers:
+            st.info("No stocks in your baskets pass all quality gates right now.")
         else:
-            # Enrich with quality gates and fundamentals
-            alert_rows = []
-            for _, pb in pullbacks.iterrows():
-                tk = pb["ticker"]
-                fund_row = fundamentals_df[fundamentals_df["ticker"] == tk]
-                if fund_row.empty:
-                    continue
-                fund = fund_row.iloc[0].to_dict()
-                passes = passes_quality(fund, min_pass=quality_min)
-
-                # Find which baskets this ticker belongs to
-                membership = [name for name, members in baskets.items() if tk in members]
-
-                alert_rows.append({
-                    "Ticker": tk,
-                    "Name": fund.get("name", tk),
-                    "Baskets": ", ".join(membership),
-                    "Price": f"${pb['current_price']:.2f}",
-                    "Drop from High": f"-{pb['drop_pct']:.1f}%",
-                    "Rolling High": f"${pb['rolling_high']:.2f}",
-                    "Quality": quality_summary(fund),
-                    "Passes Gate": passes,
-                    "Net Margin": f"{fund.get('net_margin', 'N/A')}%"
-                        if fund.get('net_margin') is not None else "N/A",
-                    "Rev Growth": f"{fund.get('revenue_growth', 'N/A')}%"
-                        if fund.get('revenue_growth') is not None else "N/A",
-                    "D/E": f"{fund.get('debt_to_equity', 'N/A')}"
-                        if fund.get('debt_to_equity') is not None else "N/A",
-                })
-
-            if alert_rows:
-                alert_df = pd.DataFrame(alert_rows)
-
-                # Show quality-passing alerts first
-                passing = alert_df[alert_df["Passes Gate"] == True].drop(columns=["Passes Gate"])
-                failing = alert_df[alert_df["Passes Gate"] == False].drop(columns=["Passes Gate"])
-
-                if not passing.empty:
-                    st.subheader("Worth investigating")
-                    st.markdown(
-                        "These stocks pulled back significantly **and** pass your quality checks."
-                    )
-                    st.dataframe(passing, use_container_width=True, hide_index=True)
-                else:
-                    st.info("All pullback stocks failed quality checks — nothing actionable right now.")
-
-                if not failing.empty:
-                    with st.expander(f"Failed quality gate ({len(failing)} stocks)"):
-                        st.markdown("These pulled back but have weak fundamentals. Proceed with caution.")
-                        st.dataframe(failing, use_container_width=True, hide_index=True)
+            # Step 2: detect pullbacks among quality stocks only
+            quality_price_cols = [t for t in quality_tickers if t in prices.columns]
+            if not quality_price_cols:
+                st.info("No price data for quality stocks.")
             else:
-                st.success("No pullback alerts right now.")
+                pullbacks = detect_pullbacks(
+                    prices[quality_price_cols],
+                    threshold_pct=pullback_threshold,
+                    lookback_days=lookback_days,
+                )
+
+                if pullbacks.empty:
+                    st.success(
+                        f"No quality stocks have pulled back {pullback_threshold}%+ right now. "
+                        "Your baskets are holding up."
+                    )
+                else:
+                    # Enrich with fundamentals and dip context
+                    rows = []
+                    for _, pb in pullbacks.iterrows():
+                        tk = pb["ticker"]
+                        fund_row = fundamentals_df[fundamentals_df["ticker"] == tk]
+                        if fund_row.empty:
+                            continue
+                        fund = fund_row.iloc[0].to_dict()
+
+                        membership = _baskets_for(tk)
+                        # Classify dip using first basket's tickers
+                        first_basket = membership[0] if membership else None
+                        basket_members = baskets.get(first_basket, []) if first_basket else []
+                        dip_type = classify_dip(prices, tk, basket_members, lookback=lookback_days)
+
+                        rows.append({
+                            "Ticker": tk,
+                            "Name": fund.get("name", tk),
+                            "Baskets": ", ".join(membership),
+                            "Price": f"${pb['current_price']:.2f}",
+                            "Drop": f"-{pb['drop_pct']:.0f}%",
+                            "Net Margin": _fmt_pct(fund.get("net_margin")),
+                            "FCF": _fmt_cash(fund.get("fcf")),
+                            "Rev Growth": _fmt_pct(fund.get("revenue_growth")),
+                            "Dip Type": DIP_LABELS.get(dip_type, dip_type),
+                        })
+
+                    if rows:
+                        alert_df = pd.DataFrame(rows)
+                        st.dataframe(alert_df, use_container_width=True, hide_index=True)
+
+                        st.markdown("---")
+                        st.markdown(
+                            "**Dip Type guide:** "
+                            "*Market-wide* = SPY is also down (safest to buy). "
+                            "*Sector* = the whole basket is down. "
+                            "*Stock-specific* = only this stock is falling (most dangerous — dig deeper)."
+                        )
+                    else:
+                        st.success("No actionable alerts right now.")
+
+            # Show how many stocks were filtered out
+            total = len(fundamentals_df[~fundamentals_df.get("is_etf", False)])
+            filtered_out = total - len(quality_tickers)
+            if filtered_out > 0:
+                with st.expander(f"{filtered_out} stocks hidden (failed quality gate)"):
+                    st.markdown(
+                        "These stocks are in your baskets but don't pass all quality gates. "
+                        "They'll never show up as buy-the-dip candidates."
+                    )
+                    failed_rows = []
+                    for _, row in fundamentals_df.iterrows():
+                        rd = row.to_dict()
+                        if rd.get("is_etf") or passes_quality(rd):
+                            continue
+                        failures = quality_failures(rd)
+                        failed_rows.append({
+                            "Ticker": rd.get("ticker", "?"),
+                            "Name": rd.get("name", "?"),
+                            "Why": "; ".join(failures),
+                        })
+                    if failed_rows:
+                        st.dataframe(
+                            pd.DataFrame(failed_rows),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+
+# ---------------------------------------------------------------------------
+# TAB: Stock Detail
+# ---------------------------------------------------------------------------
+with tab_detail:
+    st.header("Stock Detail")
+    st.markdown("Deep dive into any stock — quality gates, fundamentals, price chart, and dip context.")
+
+    all_tk = sorted(unique_tickers)
+    selected = st.selectbox("Pick a ticker", options=all_tk, index=0)
+
+    if selected:
+        fund_row = fundamentals_df[fundamentals_df["ticker"] == selected]
+        if fund_row.empty:
+            st.warning(f"No data for {selected}")
+        else:
+            fund = fund_row.iloc[0].to_dict()
+            passes = passes_quality(fund)
+
+            # Header row
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Price", f"${fund.get('current_price', 0):.2f}" if fund.get("current_price") else "N/A")
+            col2.metric("Market Cap", _fmt_cap(fund.get("market_cap")))
+            col3.metric("% Below 52W High", f"-{fund.get('pct_below_high', 0):.1f}%" if fund.get("pct_below_high") else "N/A")
+            col4.metric("Quality", quality_summary(fund))
+
+            # Pass/fail banner
+            if passes:
+                st.success("This stock passes all quality gates — eligible for buy-the-dip alerts.")
+            else:
+                st.error("This stock FAILS quality checks — it will never appear in alerts.")
+
+            # Quality gate breakdown
+            st.subheader("Quality Gates")
+            gate_results = run_quality_gate(fund)
+            gate_cols = st.columns(len(gate_results))
+            for i, gate in enumerate(gate_results):
+                icon = ":white_check_mark:" if gate["passed"] else ":x:"
+                gate_cols[i].markdown(f"{icon} **{gate['name']}**")
+                if not gate["passed"]:
+                    gate_cols[i].caption(gate["reason"])
+
+            # Key metrics
+            st.subheader("Key Metrics")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Net Margin", _fmt_pct(fund.get("net_margin")))
+            m2.metric("Free Cash Flow", _fmt_cash(fund.get("fcf")))
+            m3.metric("FCF Margin", _fmt_pct(fund.get("fcf_margin")))
+            m4.metric("Revenue Growth", _fmt_pct(fund.get("revenue_growth")))
+
+            m5, m6, m7, m8 = st.columns(4)
+            m5.metric("P/E (TTM)", f"{fund['pe_ttm']:.1f}" if fund.get("pe_ttm") else "—")
+            m6.metric("Forward P/E", f"{fund['forward_pe']:.1f}" if fund.get("forward_pe") else "—")
+            m7.metric("ROE", _fmt_pct(fund.get("roe")))
+            m8.metric("D/E", f"{fund['debt_to_equity']:.0f}%" if fund.get("debt_to_equity") else "—")
+
+            m9, m10, m11, m12 = st.columns(4)
+            m9.metric("Current Ratio", f"{fund['current_ratio']:.2f}" if fund.get("current_ratio") else "—")
+            m10.metric("Analyst Upside", _fmt_pct(fund.get("analyst_upside")))
+            m11.metric("Short % Float", f"{fund['short_pct_float']:.1f}%" if fund.get("short_pct_float") else "—")
+            m12.metric("Beta", f"{fund['beta']:.2f}" if fund.get("beta") else "—")
+
+            # Dip context
+            membership = _baskets_for(selected)
+            if membership:
+                st.subheader("Dip Context")
+                first_basket = membership[0]
+                basket_members = baskets.get(first_basket, [])
+                dip_type = classify_dip(prices, selected, basket_members, lookback=lookback_days)
+                dip_label = DIP_LABELS.get(dip_type, dip_type)
+
+                if dip_type == "market":
+                    st.info(f"**{dip_label}** — SPY is also down. This is a broad market pullback, "
+                            "not specific to this stock. Historically the safest time to buy quality.")
+                elif dip_type == "sector":
+                    st.warning(f"**{dip_label}** — The {first_basket} basket is broadly down. "
+                               "Could be sector rotation. Worth watching but not as safe as a market dip.")
+                elif dip_type == "stock":
+                    st.error(f"**{dip_label}** — Only this stock is falling while its peers are fine. "
+                             "This is the most dangerous type of dip. Dig into the news before buying.")
+                else:
+                    st.info(f"**{dip_label}**")
+
+                st.markdown(f"**Baskets:** {', '.join(membership)}")
+
+            # Price chart
+            st.subheader("Price (1 Year)")
+            if selected in prices.columns:
+                chart_prices = prices[[selected]].dropna().reset_index()
+                chart_prices.columns = ["Date", "Price"]
+                line = (
+                    alt.Chart(chart_prices)
+                    .mark_line()
+                    .encode(
+                        x="Date:T",
+                        y=alt.Y("Price:Q", scale=alt.Scale(zero=False)),
+                        tooltip=["Date:T", alt.Tooltip("Price:Q", format="$.2f")],
+                    )
+                    .properties(height=350)
+                    .interactive()
+                )
+                st.altair_chart(line, use_container_width=True)
+            else:
+                st.info("No price history available for this ticker.")
+
 
 # ---------------------------------------------------------------------------
 # TAB: Basket Overview
 # ---------------------------------------------------------------------------
-with tab_baskets:
+with tab_baskets_overview:
     st.header("Basket Overview")
-    st.markdown("How each basket is performing vs SPY across time horizons.")
+    st.markdown("How each basket is performing vs SPY.")
 
     if prices.empty:
         st.warning("No price data available.")
     else:
-        # Basket return table
         bret = basket_returns(prices, baskets)
         if not bret.empty:
-            st.subheader("Basket Returns")
-            display = bret.copy()
-            display = display.set_index("basket")
+            st.subheader("Returns by Period")
+            display = bret.copy().set_index("basket")
             for col in ["1M", "3M", "6M", "12M"]:
                 if col in display.columns:
                     display[col] = display[col].apply(
@@ -211,13 +371,9 @@ with tab_baskets:
             )
             st.altair_chart(chart, use_container_width=True)
 
-        # Sector rotation heatmap
-        st.subheader("Sector Rotation")
-        st.markdown(
-            "Which baskets are leading or lagging across time windows. "
-            "Green = outperforming, Red = underperforming."
-        )
+        # Heatmap
         if not bret.empty:
+            st.subheader("Sector Rotation")
             heat_data = bret.set_index("basket")[["1M", "3M", "6M"]].copy()
             for col in heat_data.columns:
                 heat_data[col] = pd.to_numeric(heat_data[col], errors="coerce")
@@ -249,88 +405,11 @@ with tab_baskets:
             )
             st.altair_chart(heatmap + text, use_container_width=True)
 
-# ---------------------------------------------------------------------------
-# TAB: Stock Detail
-# ---------------------------------------------------------------------------
-with tab_detail:
-    st.header("Stock Detail")
-    st.markdown("Drill into a single stock — fundamentals, quality gate, and price chart.")
-
-    all_tk = sorted(unique_tickers)
-    selected = st.selectbox("Pick a ticker", options=all_tk, index=0)
-
-    if selected:
-        fund_row = fundamentals_df[fundamentals_df["ticker"] == selected]
-        if fund_row.empty:
-            st.warning(f"No data for {selected}")
-        else:
-            fund = fund_row.iloc[0].to_dict()
-
-            # Header
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Price", f"${fund.get('current_price', 0):.2f}" if fund.get("current_price") else "N/A")
-            col2.metric("Market Cap", _fmt_cap(fund.get("market_cap")))
-            col3.metric("% Below 52W High", f"-{fund.get('pct_below_high', 0):.1f}%" if fund.get("pct_below_high") else "N/A")
-
-            # Quality gate
-            st.subheader("Quality Gate")
-            gate_results = run_quality_gate(fund)
-            gate_labels = {
-                "profitable": "Profitable (net margin > 0)",
-                "revenue_growing": "Revenue growing (YoY > 0)",
-                "not_overleveraged": "Debt manageable (D/E < 250%)",
-                "has_liquidity": "Liquidity OK (current ratio > 0.8)",
-                "not_penny_stock": "Market cap > $500M",
-            }
-            gate_cols = st.columns(len(gate_results))
-            for i, (name, passed) in enumerate(gate_results.items()):
-                icon = "white_check_mark" if passed else "x"
-                gate_cols[i].markdown(f":{icon}: **{gate_labels.get(name, name)}**")
-
-            # Key metrics
-            st.subheader("Key Metrics")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("P/E (TTM)", f"{fund['pe_ttm']:.1f}" if fund.get("pe_ttm") else "N/A")
-            m2.metric("Net Margin", f"{fund['net_margin']:.1f}%" if fund.get("net_margin") else "N/A")
-            m3.metric("ROE", f"{fund['roe']:.1f}%" if fund.get("roe") else "N/A")
-            m4.metric("Rev Growth", f"{fund['revenue_growth']:.1f}%" if fund.get("revenue_growth") else "N/A")
-
-            m5, m6, m7, m8 = st.columns(4)
-            m5.metric("Forward P/E", f"{fund['forward_pe']:.1f}" if fund.get("forward_pe") else "N/A")
-            m6.metric("D/E", f"{fund['debt_to_equity']:.0f}%" if fund.get("debt_to_equity") else "N/A")
-            m7.metric("FCF Margin", f"{fund['fcf_margin']:.1f}%" if fund.get("fcf_margin") else "N/A")
-            m8.metric("Analyst Upside", f"{fund['analyst_upside']:+.1f}%" if fund.get("analyst_upside") else "N/A")
-
-            # Basket membership
-            membership = [name for name, members in baskets.items() if selected in members]
-            if membership:
-                st.markdown(f"**Baskets:** {', '.join(membership)}")
-
-            # Price chart
-            st.subheader("Price (1 Year)")
-            if selected in prices.columns:
-                chart_prices = prices[[selected]].dropna().reset_index()
-                chart_prices.columns = ["Date", "Price"]
-                line = (
-                    alt.Chart(chart_prices)
-                    .mark_line()
-                    .encode(
-                        x="Date:T",
-                        y=alt.Y("Price:Q", scale=alt.Scale(zero=False)),
-                        tooltip=["Date:T", alt.Tooltip("Price:Q", format="$.2f")],
-                    )
-                    .properties(height=300)
-                    .interactive()
-                )
-                st.altair_chart(line, use_container_width=True)
-            else:
-                st.info("No price history available for this ticker.")
-
 
 # ---------------------------------------------------------------------------
 # TAB: Baskets
 # ---------------------------------------------------------------------------
-with tab_settings:
+with tab_baskets:
     st.header("Your Baskets")
     st.markdown("Current basket definitions loaded from `baskets.json`.")
 
