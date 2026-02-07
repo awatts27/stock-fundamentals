@@ -67,7 +67,7 @@ tab_alerts, tab_baskets, tab_detail, tab_settings = st.tabs([
 # ---------------------------------------------------------------------------
 st.sidebar.header("Settings")
 pullback_threshold = st.sidebar.slider(
-    "Pullback alert threshold %", 5, 40, 15, 5,
+    "Pullback alert threshold %", 5, 50, 30, 5,
     help="Alert when a stock drops this much from its rolling high",
 )
 lookback_days = st.sidebar.slider(
@@ -232,7 +232,7 @@ with tab_baskets:
                     y=alt.Y("basket:N", title="Basket", sort="-x"),
                     color=alt.Color(
                         "Return %:Q",
-                        scale=alt.Scale(scheme="redgreen", domainMid=0),
+                        scale=alt.Scale(scheme="redyellowgreen", domainMid=0),
                     ),
                     tooltip=["basket:N", "Period:N", alt.Tooltip("Return %:Q", format="+.1f")],
                 )
