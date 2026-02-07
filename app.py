@@ -427,23 +427,53 @@ with tab_detail:
 
                 st.markdown(f"**Baskets:** {', '.join(membership)}")
 
-            # Price chart
-            st.subheader("Price (1 Year)")
+            # Price chart — stock vs S&P 500 (normalized to % change)
+            st.subheader("Price vs S&P 500 (1 Year)")
             if selected in prices.columns:
-                chart_prices = prices[[selected]].dropna().reset_index()
-                chart_prices.columns = ["Date", "Price"]
+                # Build normalized % change for the stock
+                stock_prices = prices[[selected]].dropna()
+                stock_norm = ((stock_prices[selected] / stock_prices[selected].iloc[0]) - 1) * 100
+
+                chart_data = pd.DataFrame({"Date": stock_norm.index, selected: stock_norm.values})
+
+                # Add SPY if available
+                if "SPY" in prices.columns:
+                    spy_prices = prices[["SPY"]].dropna()
+                    # Align to same start date
+                    common_start = max(stock_prices.index[0], spy_prices.index[0])
+                    spy_aligned = spy_prices[spy_prices.index >= common_start]
+                    stock_aligned = stock_norm[stock_norm.index >= common_start]
+                    spy_norm = ((spy_aligned["SPY"] / spy_aligned["SPY"].iloc[0]) - 1) * 100
+
+                    chart_data = pd.DataFrame({
+                        "Date": stock_aligned.index,
+                        selected: (prices[selected][prices.index >= common_start] / prices[selected][prices.index >= common_start].iloc[0] - 1) * 100,
+                    })
+                    chart_data["S&P 500"] = spy_norm.values[:len(chart_data)]
+
+                chart_melted = chart_data.melt(
+                    id_vars="Date", var_name="Symbol", value_name="Change %"
+                )
+
                 line = (
-                    alt.Chart(chart_prices)
+                    alt.Chart(chart_melted)
                     .mark_line()
                     .encode(
                         x="Date:T",
-                        y=alt.Y("Price:Q", scale=alt.Scale(zero=False)),
-                        tooltip=["Date:T", alt.Tooltip("Price:Q", format="$.2f")],
+                        y=alt.Y("Change %:Q", axis=alt.Axis(format="+.0f")),
+                        color=alt.Color("Symbol:N"),
+                        strokeDash=alt.condition(
+                            alt.datum.Symbol == "S&P 500",
+                            alt.value([5, 5]),
+                            alt.value([0]),
+                        ),
+                        tooltip=["Date:T", "Symbol:N", alt.Tooltip("Change %:Q", format="+.1f")],
                     )
                     .properties(height=350)
                     .interactive()
                 )
                 st.altair_chart(line, use_container_width=True)
+                st.caption("Both lines normalized to % change from 1 year ago. S&P 500 shown as dashed line.")
             else:
                 st.info("No price history available for this ticker.")
 
