@@ -6,76 +6,88 @@
         "META",
         "RDDT",
         "NVDA",
-        "RSX",
         "FUBO"
     ],
-    "Nuclear": [
+    "Technology": [
+        "AAPL",
+        "MSFT",
+        "GOOG",
+        "META",
+        "AMZN",
+        "NFLX",
+        "CRM",
+        "ORCL",
+        "SAP",
+        "ADBE",
+        "INTU",
+        "NOW",
+        "SHOP",
+        "SNOW",
+        "PLTR",
+        "RDDT",
+        "UBER"
+    ],
+    "Semiconductors": [
+        "NVDA",
+        "AMD",
+        "TSM",
+        "ASML",
+        "AVGO",
+        "QCOM",
+        "MRVL",
+        "LRCX",
+        "AMAT",
+        "KLAC",
+        "KEYS",
+        "FORM"
+    ],
+    "Cybersecurity": [
+        "PANW",
+        "CRWD",
+        "FTNT",
+        "ZS",
+        "CYBR",
+        "S",
+        "NET"
+    ],
+    "Quantum Computing": [
+        "IONQ",
+        "RGTI",
+        "QBTS",
+        "QUBT"
+    ],
+    "Nuclear & Energy": [
         "OKLO",
         "CCJ",
         "BXXT",
         "LEU",
         "SMR",
-        "NLR",
-        "URA",
-        "URNM"
+        "CEG",
+        "VST",
+        "NEE"
     ],
-    "Mag7": [
-        "META",
-        "AMZN",
-        "NFLX",
-        "GOOG",
-        "AAPL",
-        "MSFT",
-        "NVDA"
+    "Healthcare": [
+        "UNH",
+        "ELV",
+        "CI",
+        "HUM",
+        "CNC",
+        "MOH",
+        "CVS",
+        "ABT",
+        "JNJ",
+        "LLY",
+        "TMO"
     ],
-    "Quantum": [
-        "QTUM",
-        "KEYS",
-        "FORM",
-        "RGTI",
-        "QBTS",
-        "QUBT",
-        "IONQ"
-    ],
-    "Europe Granolas": [
-        "GSK",
-        "RHHBY",
-        "ASML",
-        "NSRGY",
-        "NVS",
-        "NVO",
-        "LRLCY",
-        "LVMUY",
-        "AZN",
-        "SAP",
-        "SNY"
-    ],
-    "Asia Platform Leaders": [
-        "TSM",
-        "SSNLF",
-        "TCEHY",
-        "BABA",
-        "MEITF",
-        "SFTBY",
-        "SONY"
-    ],
-    "AI Leaders": [
-        "NVDA",
-        "MSFT",
-        "GOOGL",
-        "AMZN",
-        "META",
-        "AVGO",
-        "AMD",
-        "TSM",
-        "ASML",
-        "CRM",
-        "SNOW",
-        "PLTR",
-        "ORCL",
-        "SHOP",
-        "NBIS",
-        "SNOW"
+    "Fintech": [
+        "HOOD",
+        "SQ",
+        "PYPL",
+        "SOFI",
+        "COIN",
+        "AFRM",
+        "BULL",
+        "SPGI"
     ],
     "China Growth": [
         "TCEHY",
@@ -93,31 +105,31 @@
         "BILI",
         "KWAHY"
     ],
-    "US Health Insurers": [
-        "UNH",
-        "ELV",
-        "CI",
-        "HUM",
-        "CNC",
-        "MOH",
-        "OSCR",
-        "CVS"
+    "Europe Blue Chips": [
+        "GSK",
+        "RHHBY",
+        "ASML",
+        "NSRGY",
+        "NVS",
+        "NVO",
+        "LRLCY",
+        "LVMUY",
+        "AZN",
+        "SAP",
+        "SNY"
     ],
-    "Climate Adaption": [
+    "Japan & Korea": [
+        "SONY",
+        "SFTBY",
+        "SSNLF"
+    ],
+    "Climate & Clean Energy": [
         "XYL",
-        "J",
         "ACM",
         "TTEK",
-        "FIW",
-        "PHO"
-    ],
-    "Cyber Security": [
-        "PANW",
-        "CRWD",
-        "FTNT",
-        "ZS",
-        "CYBR",
-        "IHAK",
-        "CIBR"
+        "ENPH",
+        "SEDG",
+        "FSLR",
+        "BEP"
     ]
 }
