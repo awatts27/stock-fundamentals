@@ -1,9 +1,5 @@
 yfinance
 pandas
-python-dotenv
-gspread
-google-auth
+numpy
 streamlit
 altair
-sec-api
-requests
