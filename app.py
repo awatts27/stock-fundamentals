@@ -320,6 +320,90 @@ with tab_detail:
             st.markdown(f"[View {selected} on Yahoo Finance](https://finance.yahoo.com/quote/{selected}/) · "
                         f"[Latest news](https://finance.yahoo.com/quote/{selected}/news/)")
 
+            # Conviction check
+            st.subheader("Conviction Check")
+            st.caption("Quick signals to help you decide if this dip is worth buying. Not a recommendation — just data.")
+
+            checks = []
+
+            # 1. Analysts still bullish?
+            upside = fund.get("analyst_upside")
+            if upside is not None:
+                if upside > 10:
+                    checks.append(("Analysts still bullish", f"Target implies {upside:+.0f}% upside", True))
+                elif upside > 0:
+                    checks.append(("Analysts lukewarm", f"Target implies only {upside:+.0f}% upside", None))
+                else:
+                    checks.append(("Analysts bearish", f"Target implies {upside:+.0f}% (downside)", False))
+            else:
+                checks.append(("No analyst data", "No price target available", None))
+
+            # 2. Earnings direction — forward P/E vs trailing P/E
+            fwd_pe = fund.get("forward_pe")
+            trail_pe = fund.get("pe_ttm")
+            if fwd_pe and trail_pe and trail_pe > 0:
+                if fwd_pe < trail_pe * 0.9:
+                    checks.append(("Earnings expected to grow", f"Forward P/E ({fwd_pe:.0f}) < Trailing P/E ({trail_pe:.0f})", True))
+                elif fwd_pe > trail_pe * 1.1:
+                    checks.append(("Earnings expected to shrink", f"Forward P/E ({fwd_pe:.0f}) > Trailing P/E ({trail_pe:.0f})", False))
+                else:
+                    checks.append(("Earnings roughly flat", f"Forward P/E ({fwd_pe:.0f}) ≈ Trailing P/E ({trail_pe:.0f})", None))
+            else:
+                checks.append(("Can't assess earnings direction", "Missing P/E data", None))
+
+            # 3. Short sellers piling in?
+            short_pct = fund.get("short_pct_float")
+            if short_pct is not None:
+                if short_pct > 10:
+                    checks.append(("Heavy short interest", f"{short_pct:.1f}% of float shorted — bears are aggressive", False))
+                elif short_pct > 5:
+                    checks.append(("Elevated short interest", f"{short_pct:.1f}% of float shorted — some bearish bets", None))
+                else:
+                    checks.append(("Low short interest", f"{short_pct:.1f}% of float shorted — bears aren't interested", True))
+            else:
+                checks.append(("No short interest data", "Short % of float unavailable", None))
+
+            # 4. Revenue AND earnings both declining?
+            rev_g = fund.get("revenue_growth")
+            earn_g = fund.get("earnings_growth")
+            if rev_g is not None and earn_g is not None:
+                if rev_g < 0 and earn_g < 0:
+                    checks.append(("Double decline", f"Revenue ({rev_g:+.1f}%) and earnings ({earn_g:+.1f}%) both shrinking", False))
+                elif rev_g > 0 and earn_g > 0:
+                    checks.append(("Both growing", f"Revenue ({rev_g:+.1f}%) and earnings ({earn_g:+.1f}%) both up", True))
+                elif rev_g > 0 and earn_g < 0:
+                    checks.append(("Revenue up, earnings down", f"Revenue ({rev_g:+.1f}%) growing but earnings ({earn_g:+.1f}%) falling — spending to grow?", None))
+                else:
+                    checks.append(("Mixed signals", f"Revenue ({rev_g:+.1f}%) and earnings ({earn_g:+.1f}%)", None))
+            elif rev_g is not None:
+                if rev_g > 0:
+                    checks.append(("Revenue growing", f"{rev_g:+.1f}% (no earnings growth data)", True))
+                else:
+                    checks.append(("Revenue declining", f"{rev_g:+.1f}% (no earnings growth data)", False))
+            else:
+                checks.append(("Growth data unavailable", "Can't assess revenue/earnings trend", None))
+
+            # Display checks
+            for label, detail, signal in checks:
+                if signal is True:
+                    st.markdown(f":white_check_mark: **{label}** — {detail}")
+                elif signal is False:
+                    st.markdown(f":x: **{label}** — {detail}")
+                else:
+                    st.markdown(f":large_orange_diamond: **{label}** — {detail}")
+
+            # Summary
+            green = sum(1 for _, _, s in checks if s is True)
+            red = sum(1 for _, _, s in checks if s is False)
+            if green >= 3 and red == 0:
+                st.success("Signals are mostly positive. The dip may be a buying opportunity — but always check the news.")
+            elif red >= 3:
+                st.error("Multiple warning signs. This dip might be justified. Proceed with caution.")
+            elif red >= 2:
+                st.warning("Mixed signals. Do your research before buying.")
+            else:
+                st.info("Signals are mixed. Check the Yahoo Finance link above for recent news.")
+
             # Dip context
             membership = _baskets_for(selected)
             if membership:
