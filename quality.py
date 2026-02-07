@@ -38,8 +38,9 @@ GATES = [
     ),
     (
         "Can pay its bills",
-        lambda r: r.get("current_ratio") is None or r["current_ratio"] >= 1.0,
-        "Current ratio below 1 — can't cover short-term obligations",
+        lambda r: (r.get("current_ratio") is None or r["current_ratio"] >= 1.0)
+                  or (r.get("fcf") is not None and r["fcf"] > 0),
+        "Current ratio below 1 AND negative free cash flow — can't cover obligations",
     ),
     (
         "Not a penny stock",
