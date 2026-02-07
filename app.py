@@ -204,6 +204,8 @@ with tab_alerts:
                                 if item["membership"]:
                                     st.markdown(f"**Baskets:** {', '.join(item['membership'])}")
 
+                                st.markdown(f"[Latest news on Yahoo Finance](https://finance.yahoo.com/quote/{tk}/news/)")
+
                                 if summary:
                                     st.caption(summary[:300] + ("..." if len(summary) > 300 else ""))
 
@@ -313,6 +315,10 @@ with tab_detail:
             m10.metric("Analyst Upside", _fmt_pct(fund.get("analyst_upside")))
             m11.metric("Short % Float", f"{fund['short_pct_float']:.1f}%" if fund.get("short_pct_float") else "—")
             m12.metric("Beta", f"{fund['beta']:.2f}" if fund.get("beta") else "—")
+
+            # External links
+            st.markdown(f"[View {selected} on Yahoo Finance](https://finance.yahoo.com/quote/{selected}/) · "
+                        f"[Latest news](https://finance.yahoo.com/quote/{selected}/news/)")
 
             # Dip context
             membership = _baskets_for(selected)
