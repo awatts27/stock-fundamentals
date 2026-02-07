@@ -175,42 +175,37 @@ with tab_alerts:
                         })
 
                     if alert_data:
-                        # Column headers
-                        hdr = st.columns([1.2, 2.5, 1, 1, 1.2, 1, 1.2, 1.5])
-                        hdr[0].markdown("**Ticker**")
-                        hdr[1].markdown("**Name**")
-                        hdr[2].markdown("**Price**")
-                        hdr[3].markdown("**Drop**")
-                        hdr[4].markdown("**Net Margin**")
-                        hdr[5].markdown("**FCF**")
-                        hdr[6].markdown("**Rev Growth**")
-                        hdr[7].markdown("**Dip Type**")
-
                         for item in alert_data:
                             fund = item["fund"]
                             pb = item["pb"]
                             dip_type = item["dip_type"]
                             tk = fund.get("ticker", "?")
+                            name = fund.get("name", tk)
                             summary = fund.get("summary", "")
+                            dip_label = DIP_LABELS.get(dip_type, dip_type)
 
-                            cols = st.columns([1.2, 2.5, 1, 1, 1.2, 1, 1.2, 1.5])
-                            # Ticker with popover for company description
-                            with cols[0]:
-                                with st.popover(f"**{tk}**"):
-                                    st.markdown(f"**{fund.get('name', tk)}**")
-                                    if fund.get("industry"):
-                                        st.caption(f"{fund.get('sector', '')} / {fund['industry']}")
-                                    if summary:
-                                        st.markdown(summary[:500] + ("..." if len(summary) > 500 else ""))
-                                    else:
-                                        st.markdown("*No description available.*")
-                            cols[1].markdown(fund.get("name", tk))
-                            cols[2].markdown(f"${pb['current_price']:.2f}")
-                            cols[3].markdown(f"**-{pb['drop_pct']:.0f}%**")
-                            cols[4].markdown(_fmt_pct(fund.get("net_margin")))
-                            cols[5].markdown(_fmt_cash(fund.get("fcf")))
-                            cols[6].markdown(_fmt_pct(fund.get("revenue_growth")))
-                            cols[7].markdown(DIP_LABELS.get(dip_type, dip_type))
+                            with st.expander(
+                                f"**{tk}** — {name}  ·  ${pb['current_price']:.2f}  ·  "
+                                f"**-{pb['drop_pct']:.0f}%**  ·  {dip_label}"
+                            ):
+                                c1, c2, c3, c4 = st.columns(4)
+                                c1.metric("Price", f"${pb['current_price']:.2f}")
+                                c2.metric("Drop", f"-{pb['drop_pct']:.0f}%")
+                                c3.metric("Net Margin", _fmt_pct(fund.get("net_margin")))
+                                c4.metric("Rev Growth", _fmt_pct(fund.get("revenue_growth")))
+
+                                c5, c6, c7, c8 = st.columns(4)
+                                c5.metric("FCF", _fmt_cash(fund.get("fcf")))
+                                c6.metric("FCF Margin", _fmt_pct(fund.get("fcf_margin")))
+                                c7.metric("P/E", f"{fund['pe_ttm']:.1f}" if fund.get("pe_ttm") else "—")
+                                c8.metric("D/E", f"{fund['debt_to_equity']:.0f}%" if fund.get("debt_to_equity") else "—")
+
+                                st.markdown(f"**Dip Type:** {dip_label}")
+                                if item["membership"]:
+                                    st.markdown(f"**Baskets:** {', '.join(item['membership'])}")
+
+                                if summary:
+                                    st.caption(summary[:300] + ("..." if len(summary) > 300 else ""))
 
                         st.markdown("---")
                         st.markdown(
@@ -219,7 +214,6 @@ with tab_alerts:
                             "*Sector* = the whole basket is down. "
                             "*Stock-specific* = only this stock is falling (most dangerous — dig deeper)."
                         )
-                        st.caption("Click any **ticker** to see what the company does.")
                     else:
                         st.success("No actionable alerts right now.")
 
