@@ -154,7 +154,7 @@ with tab_alerts:
                     )
                 else:
                     # Enrich with fundamentals and dip context
-                    rows = []
+                    alert_data = []
                     for _, pb in pullbacks.iterrows():
                         tk = pb["ticker"]
                         fund_row = fundamentals_df[fundamentals_df["ticker"] == tk]
@@ -163,26 +163,54 @@ with tab_alerts:
                         fund = fund_row.iloc[0].to_dict()
 
                         membership = _baskets_for(tk)
-                        # Classify dip using first basket's tickers
                         first_basket = membership[0] if membership else None
                         basket_members = baskets.get(first_basket, []) if first_basket else []
                         dip_type = classify_dip(prices, tk, basket_members, lookback=lookback_days)
 
-                        rows.append({
-                            "Ticker": tk,
-                            "Name": fund.get("name", tk),
-                            "Baskets": ", ".join(membership),
-                            "Price": f"${pb['current_price']:.2f}",
-                            "Drop": f"-{pb['drop_pct']:.0f}%",
-                            "Net Margin": _fmt_pct(fund.get("net_margin")),
-                            "FCF": _fmt_cash(fund.get("fcf")),
-                            "Rev Growth": _fmt_pct(fund.get("revenue_growth")),
-                            "Dip Type": DIP_LABELS.get(dip_type, dip_type),
+                        alert_data.append({
+                            "fund": fund,
+                            "pb": pb,
+                            "membership": membership,
+                            "dip_type": dip_type,
                         })
 
-                    if rows:
-                        alert_df = pd.DataFrame(rows)
-                        st.dataframe(alert_df, use_container_width=True, hide_index=True)
+                    if alert_data:
+                        # Column headers
+                        hdr = st.columns([1.2, 2.5, 1, 1, 1.2, 1, 1.2, 1.5])
+                        hdr[0].markdown("**Ticker**")
+                        hdr[1].markdown("**Name**")
+                        hdr[2].markdown("**Price**")
+                        hdr[3].markdown("**Drop**")
+                        hdr[4].markdown("**Net Margin**")
+                        hdr[5].markdown("**FCF**")
+                        hdr[6].markdown("**Rev Growth**")
+                        hdr[7].markdown("**Dip Type**")
+
+                        for item in alert_data:
+                            fund = item["fund"]
+                            pb = item["pb"]
+                            dip_type = item["dip_type"]
+                            tk = fund.get("ticker", "?")
+                            summary = fund.get("summary", "")
+
+                            cols = st.columns([1.2, 2.5, 1, 1, 1.2, 1, 1.2, 1.5])
+                            # Ticker with popover for company description
+                            with cols[0]:
+                                with st.popover(f"**{tk}**"):
+                                    st.markdown(f"**{fund.get('name', tk)}**")
+                                    if fund.get("industry"):
+                                        st.caption(f"{fund.get('sector', '')} / {fund['industry']}")
+                                    if summary:
+                                        st.markdown(summary[:500] + ("..." if len(summary) > 500 else ""))
+                                    else:
+                                        st.markdown("*No description available.*")
+                            cols[1].markdown(fund.get("name", tk))
+                            cols[2].markdown(f"${pb['current_price']:.2f}")
+                            cols[3].markdown(f"**-{pb['drop_pct']:.0f}%**")
+                            cols[4].markdown(_fmt_pct(fund.get("net_margin")))
+                            cols[5].markdown(_fmt_cash(fund.get("fcf")))
+                            cols[6].markdown(_fmt_pct(fund.get("revenue_growth")))
+                            cols[7].markdown(DIP_LABELS.get(dip_type, dip_type))
 
                         st.markdown("---")
                         st.markdown(
@@ -191,6 +219,7 @@ with tab_alerts:
                             "*Sector* = the whole basket is down. "
                             "*Stock-specific* = only this stock is falling (most dangerous — dig deeper)."
                         )
+                        st.caption("Click any **ticker** to see what the company does.")
                     else:
                         st.success("No actionable alerts right now.")
 
@@ -239,6 +268,14 @@ with tab_detail:
         else:
             fund = fund_row.iloc[0].to_dict()
             passes = passes_quality(fund)
+
+            # Company description
+            summary = fund.get("summary", "")
+            if summary:
+                with st.expander(f"About {fund.get('name', selected)}"):
+                    if fund.get("industry"):
+                        st.caption(f"{fund.get('sector', '')} / {fund['industry']}")
+                    st.markdown(summary)
 
             # Header row
             col1, col2, col3, col4 = st.columns(4)
