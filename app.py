@@ -14,6 +14,7 @@ from data import (
     load_baskets,
     all_tickers,
     fetch_price_history,
+    fetch_fundamentals,
     fetch_all_fundamentals,
     classify_dip,
     DIP_LABELS,
@@ -255,15 +256,38 @@ with tab_detail:
     st.markdown("Deep dive into any stock — quality gates, fundamentals, price chart, and dip context.")
 
     all_tk = sorted(unique_tickers)
-    selected = st.selectbox("Pick a ticker", options=all_tk, index=0)
+    col_search, col_or, col_select = st.columns([2, 0.5, 2])
+    with col_search:
+        custom_ticker = st.text_input(
+            "Search any ticker",
+            placeholder="e.g. TSLA, DIS, NFLX...",
+        ).strip().upper()
+    with col_or:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("**or**")
+    with col_select:
+        basket_pick = st.selectbox("Pick from your baskets", options=[""] + all_tk, index=0)
+
+    selected = custom_ticker if custom_ticker else basket_pick
 
     if selected:
+        # Check if it's already in our fetched data
         fund_row = fundamentals_df[fundamentals_df["ticker"] == selected]
-        if fund_row.empty:
-            st.warning(f"No data for {selected}")
-        else:
+        if not fund_row.empty:
             fund = fund_row.iloc[0].to_dict()
-            passes = passes_quality(fund)
+        else:
+            # Fetch on the fly for any ticker
+            with st.spinner(f"Looking up {selected}..."):
+                try:
+                    fund = fetch_fundamentals(selected)
+                except Exception:
+                    fund = None
+
+            if not fund or not fund.get("current_price"):
+                st.error(f"Could not find data for '{selected}'. Check the ticker symbol.")
+                st.stop()
+
+        passes = passes_quality(fund)
 
             # Company description
             summary = fund.get("summary", "")
@@ -406,39 +430,55 @@ with tab_detail:
 
             # Dip context
             membership = _baskets_for(selected)
+            st.subheader("Dip Context")
             if membership:
-                st.subheader("Dip Context")
                 first_basket = membership[0]
                 basket_members = baskets.get(first_basket, [])
-                dip_type = classify_dip(prices, selected, basket_members, lookback=lookback_days)
-                dip_label = DIP_LABELS.get(dip_type, dip_type)
+                dip_type = classify_dip(detail_prices, selected, basket_members, lookback=lookback_days)
+            else:
+                # Custom ticker — can still check vs SPY
+                dip_type = classify_dip(detail_prices, selected, [], lookback=lookback_days)
 
-                if dip_type == "market":
-                    st.info(f"**{dip_label}** — SPY is also down. This is a broad market pullback, "
-                            "not specific to this stock. Historically the safest time to buy quality.")
-                elif dip_type == "sector":
-                    st.warning(f"**{dip_label}** — The {first_basket} basket is broadly down. "
-                               "Could be sector rotation. Worth watching but not as safe as a market dip.")
-                elif dip_type == "stock":
-                    st.error(f"**{dip_label}** — Only this stock is falling while its peers are fine. "
-                             "This is the most dangerous type of dip. Dig into the news before buying.")
-                else:
-                    st.info(f"**{dip_label}**")
+            dip_label = DIP_LABELS.get(dip_type, dip_type)
 
+            if dip_type == "market":
+                st.info(f"**{dip_label}** — SPY is also down. This is a broad market pullback, "
+                        "not specific to this stock. Historically the safest time to buy quality.")
+            elif dip_type == "sector":
+                first_basket = membership[0] if membership else "sector"
+                st.warning(f"**{dip_label}** — The {first_basket} basket is broadly down. "
+                           "Could be sector rotation. Worth watching but not as safe as a market dip.")
+            elif dip_type == "stock":
+                st.error(f"**{dip_label}** — Only this stock is falling while its peers are fine. "
+                         "This is the most dangerous type of dip. Dig into the news before buying.")
+            else:
+                st.info(f"**{dip_label}**")
+
+            if membership:
                 st.markdown(f"**Baskets:** {', '.join(membership)}")
+            else:
+                st.caption("This stock is not in any of your baskets.")
 
             # Price chart — stock vs S&P 500 (normalized to % change)
             st.subheader("Price vs S&P 500 (1 Year)")
-            if selected in prices.columns:
+
+            # Fetch price data on the fly if this is a custom ticker
+            detail_prices = prices
+            if selected not in prices.columns:
+                custom_prices = fetch_price_history([selected, "SPY"], period="1y")
+                if not custom_prices.empty:
+                    detail_prices = custom_prices
+
+            if selected in detail_prices.columns:
                 # Build normalized % change for the stock
-                stock_prices = prices[[selected]].dropna()
+                stock_prices = detail_prices[[selected]].dropna()
                 stock_norm = ((stock_prices[selected] / stock_prices[selected].iloc[0]) - 1) * 100
 
                 chart_data = pd.DataFrame({"Date": stock_norm.index, selected: stock_norm.values})
 
                 # Add SPY if available
-                if "SPY" in prices.columns:
-                    spy_prices = prices[["SPY"]].dropna()
+                if "SPY" in detail_prices.columns:
+                    spy_prices = detail_prices[["SPY"]].dropna()
                     # Align to same start date
                     common_start = max(stock_prices.index[0], spy_prices.index[0])
                     spy_aligned = spy_prices[spy_prices.index >= common_start]
@@ -447,7 +487,7 @@ with tab_detail:
 
                     chart_data = pd.DataFrame({
                         "Date": stock_aligned.index,
-                        selected: (prices[selected][prices.index >= common_start] / prices[selected][prices.index >= common_start].iloc[0] - 1) * 100,
+                        selected: (detail_prices[selected][detail_prices.index >= common_start] / detail_prices[selected][detail_prices.index >= common_start].iloc[0] - 1) * 100,
                     })
                     chart_data["S&P 500"] = spy_norm.values[:len(chart_data)]
 
