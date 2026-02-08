@@ -1,2 +1,6 @@
 # Local secrets and other private configuration
 .streamlit/secrets.toml
+
+# Python bytecode
+__pycache__/
+*.pyc
