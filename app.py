@@ -18,6 +18,7 @@ from data import (
     fetch_all_fundamentals,
     classify_dip,
     DIP_LABELS,
+    fetch_insider_activity,
 )
 from quality import passes_quality, quality_summary, run_quality_gate, quality_failures
 from pullbacks import detect_pullbacks
@@ -58,6 +59,22 @@ def _fmt_cash(val) -> str:
     if val <= -1_000_000:
         return f"-${abs(val) / 1_000_000:.0f}M"
     return f"${val:,.0f}"
+
+
+def _basket_averages(fundamentals_df: pd.DataFrame, basket_members: list[str], exclude: str = "") -> dict:
+    """Compute average metrics for stocks in a basket (excluding one ticker)."""
+    members = [t for t in basket_members if t != exclude]
+    df = fundamentals_df[fundamentals_df["ticker"].isin(members)]
+    if df.empty:
+        return {}
+    avgs = {}
+    for col in ["pe_ttm", "forward_pe", "net_margin", "debt_to_equity", "dividend_yield"]:
+        if col in df.columns:
+            vals = df[col].dropna()
+            avgs[col] = round(vals.mean(), 1) if len(vals) > 0 else None
+        else:
+            avgs[col] = None
+    return avgs
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +214,8 @@ with tab_alerts:
 
                                 c5, c6, c7, c8 = st.columns(4)
                                 c5.metric("FCF", _fmt_cash(fund.get("fcf")))
-                                c6.metric("FCF Margin", _fmt_pct(fund.get("fcf_margin")))
-                                c7.metric("P/E", f"{fund['pe_ttm']:.1f}" if fund.get("pe_ttm") else "—")
+                                c6.metric("P/E", f"{fund['pe_ttm']:.1f}" if fund.get("pe_ttm") else "—")
+                                c7.metric("Div Yield", f"{fund['dividend_yield']:.2f}%" if fund.get("dividend_yield") else "—")
                                 c8.metric("D/E", f"{fund['debt_to_equity']:.0f}%" if fund.get("debt_to_equity") else "—")
 
                                 st.markdown(f"**Dip Type:** {dip_label}")
@@ -289,6 +306,14 @@ with tab_detail:
 
         passes = passes_quality(fund)
 
+        # Basket membership and peer averages
+        membership = _baskets_for(selected)
+        basket_avg = {}
+        if membership:
+            _first_bkt = membership[0]
+            _bkt_members = baskets.get(_first_bkt, [])
+            basket_avg = _basket_averages(fundamentals_df, _bkt_members, exclude=selected)
+
         # Company description
         summary = fund.get("summary", "")
         if summary:
@@ -322,23 +347,52 @@ with tab_detail:
 
         # Key metrics
         st.subheader("Key Metrics")
+        _avg_nm = basket_avg.get("net_margin")
+        _avg_pe = basket_avg.get("pe_ttm")
+        _avg_fpe = basket_avg.get("forward_pe")
+        _avg_de = basket_avg.get("debt_to_equity")
+        _avg_dy = basket_avg.get("dividend_yield")
+
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Net Margin", _fmt_pct(fund.get("net_margin")))
+        nm_val = _fmt_pct(fund.get("net_margin"))
+        if _avg_nm and fund.get("net_margin") is not None:
+            nm_val += f" (avg {_avg_nm:.0f}%)"
+        m1.metric("Net Margin", nm_val)
         m2.metric("Free Cash Flow", _fmt_cash(fund.get("fcf")))
         m3.metric("FCF Margin", _fmt_pct(fund.get("fcf_margin")))
         m4.metric("Revenue Growth", _fmt_pct(fund.get("revenue_growth")))
 
         m5, m6, m7, m8 = st.columns(4)
-        m5.metric("P/E (TTM)", f"{fund['pe_ttm']:.1f}" if fund.get("pe_ttm") else "—")
-        m6.metric("Forward P/E", f"{fund['forward_pe']:.1f}" if fund.get("forward_pe") else "—")
+        pe_val = f"{fund['pe_ttm']:.1f}" if fund.get("pe_ttm") else "—"
+        if _avg_pe and fund.get("pe_ttm"):
+            pe_val += f" (avg {_avg_pe:.0f})"
+        m5.metric("P/E (TTM)", pe_val)
+        fpe_val = f"{fund['forward_pe']:.1f}" if fund.get("forward_pe") else "—"
+        if _avg_fpe and fund.get("forward_pe"):
+            fpe_val += f" (avg {_avg_fpe:.0f})"
+        m6.metric("Forward P/E", fpe_val)
         m7.metric("ROE", _fmt_pct(fund.get("roe")))
-        m8.metric("D/E", f"{fund['debt_to_equity']:.0f}%" if fund.get("debt_to_equity") else "—")
+        de_val = f"{fund['debt_to_equity']:.0f}%" if fund.get("debt_to_equity") else "—"
+        if _avg_de and fund.get("debt_to_equity"):
+            de_val += f" (avg {_avg_de:.0f}%)"
+        m8.metric("D/E", de_val)
 
         m9, m10, m11, m12 = st.columns(4)
         m9.metric("Current Ratio", f"{fund['current_ratio']:.2f}" if fund.get("current_ratio") else "—")
-        m10.metric("Analyst Upside", _fmt_pct(fund.get("analyst_upside")))
-        m11.metric("Short % Float", f"{fund['short_pct_float']:.1f}%" if fund.get("short_pct_float") else "—")
+        dy_val = f"{fund['dividend_yield']:.2f}%" if fund.get("dividend_yield") else "—"
+        if _avg_dy and fund.get("dividend_yield"):
+            dy_val += f" (avg {_avg_dy:.1f}%)"
+        m10.metric("Dividend Yield", dy_val)
+        inst = fund.get("institutional_ownership")
+        m11.metric("Institutional %", f"{inst:.1f}%" if inst else "—")
         m12.metric("Beta", f"{fund['beta']:.2f}" if fund.get("beta") else "—")
+
+        m13, m14, m15, m16 = st.columns(4)
+        m13.metric("Analyst Upside", _fmt_pct(fund.get("analyst_upside")))
+        m14.metric("Short % Float", f"{fund['short_pct_float']:.1f}%" if fund.get("short_pct_float") else "—")
+        earnings_dt = fund.get("next_earnings")
+        m15.metric("Next Earnings", earnings_dt if earnings_dt else "—")
+        m16.metric("P/E (PEG)", f"{fund['peg']:.2f}" if fund.get("peg") else "—")
 
         # External links
         st.markdown(f"[View {selected} on Yahoo Finance](https://finance.yahoo.com/quote/{selected}/) · "
@@ -407,6 +461,22 @@ with tab_detail:
         else:
             checks.append(("Growth data unavailable", "Can't assess revenue/earnings trend", None))
 
+        # 5. Insider buying?
+        insider = fetch_insider_activity(selected)
+        ins_label = insider["net_label"]
+        ins_buys = insider["buys"]
+        ins_sells = insider["sells"]
+        if ins_label == "Net buying":
+            checks.append(("Insiders buying", f"{ins_buys} buys vs {ins_sells} sells in last 6 months — management is confident", True))
+        elif ins_label == "Net selling":
+            checks.append(("Insiders selling", f"{ins_sells} sells vs {ins_buys} buys in last 6 months — management cashing out", False))
+        elif ins_label == "No recent activity":
+            checks.append(("No insider activity", "No insider transactions in last 6 months", None))
+        elif ins_label == "Mixed":
+            checks.append(("Insider activity mixed", f"{ins_buys} buys, {ins_sells} sells in last 6 months", None))
+        else:
+            checks.append(("Insider data unavailable", "Could not retrieve insider transactions", None))
+
         # Display checks
         for label, detail, signal in checks:
             if signal is True:
@@ -435,15 +505,11 @@ with tab_detail:
             if not custom_prices.empty:
                 detail_prices = custom_prices
 
-        # Dip context
-        membership = _baskets_for(selected)
+        # Dip context (membership already computed above)
         st.subheader("Dip Context")
         if membership:
-            first_basket = membership[0]
-            basket_members = baskets.get(first_basket, [])
-            dip_type = classify_dip(detail_prices, selected, basket_members, lookback=lookback_days)
+            dip_type = classify_dip(detail_prices, selected, _bkt_members, lookback=lookback_days)
         else:
-            # Custom ticker — can still check vs SPY
             dip_type = classify_dip(detail_prices, selected, [], lookback=lookback_days)
 
         dip_label = DIP_LABELS.get(dip_type, dip_type)

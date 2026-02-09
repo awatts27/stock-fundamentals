@@ -91,6 +91,19 @@ def fetch_fundamentals(ticker: str) -> dict:
     if de is not None and de < 5:
         de = de * 100
 
+    # Earnings date
+    _next_earnings = None
+    try:
+        _ed_list = info.get("earningsDate")
+        if _ed_list:
+            _ed = _ed_list[0] if isinstance(_ed_list, (list, tuple)) else _ed_list
+            if hasattr(_ed, "strftime"):
+                _next_earnings = _ed.strftime("%Y-%m-%d")
+            elif isinstance(_ed, (int, float)):
+                _next_earnings = pd.Timestamp(_ed, unit="s").strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
     return {
         "ticker": ticker,
         "name": info.get("longName") or info.get("shortName") or ticker,
@@ -121,6 +134,8 @@ def fetch_fundamentals(ticker: str) -> dict:
         "analyst_target": info.get("targetMeanPrice"),
         "analyst_upside": round((info.get("targetMeanPrice", 0) - current_price) / current_price * 100, 1) if current_price and info.get("targetMeanPrice") else None,
         "held_pct_insiders": round(info.get("heldPercentInsiders", 0) * 100, 2) if info.get("heldPercentInsiders") else None,
+        "institutional_ownership": round(info.get("heldPercentInstitutions", 0) * 100, 2) if info.get("heldPercentInstitutions") else None,
+        "next_earnings": _next_earnings,
         "is_etf": info.get("quoteType") in {"ETF", "MUTUALFUND", "INDEX"},
     }
 
@@ -137,6 +152,47 @@ def fetch_all_fundamentals(tickers: list[str]) -> pd.DataFrame:
         except Exception:
             rows.append({"ticker": tk, "name": tk})
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Insider transaction summary (fetched on demand for Stock Detail)
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_insider_activity(ticker: str) -> dict:
+    """Summarize recent insider buy/sell activity (last 6 months)."""
+    try:
+        t = yf.Ticker(ticker)
+        txns = t.insider_transactions
+        if txns is None or txns.empty:
+            return {"buys": 0, "sells": 0, "net_label": "No data"}
+
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=180)
+        if "Start Date" in txns.columns:
+            txns["Start Date"] = pd.to_datetime(txns["Start Date"], errors="coerce")
+            txns = txns[txns["Start Date"] >= cutoff]
+
+        buys, sells = 0, 0
+        text_col = "Text" if "Text" in txns.columns else None
+        for _, row in txns.iterrows():
+            text = str(row.get(text_col, "")).lower() if text_col else ""
+            if "purchase" in text or "buy" in text:
+                buys += 1
+            elif "sale" in text or "sell" in text or "disposition" in text:
+                sells += 1
+
+        if buys > 0 and buys > sells:
+            net_label = "Net buying"
+        elif sells > 0 and sells > buys:
+            net_label = "Net selling"
+        elif buys == 0 and sells == 0:
+            net_label = "No recent activity"
+        else:
+            net_label = "Mixed"
+
+        return {"buys": buys, "sells": sells, "net_label": net_label}
+    except Exception:
+        return {"buys": 0, "sells": 0, "net_label": "No data"}
 
 
 # ---------------------------------------------------------------------------
