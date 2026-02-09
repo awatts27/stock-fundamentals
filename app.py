@@ -354,35 +354,30 @@ with tab_detail:
         _avg_dy = basket_avg.get("dividend_yield")
 
         m1, m2, m3, m4 = st.columns(4)
-        nm_val = _fmt_pct(fund.get("net_margin"))
+        m1.metric("Net Margin", _fmt_pct(fund.get("net_margin")))
         if _avg_nm and fund.get("net_margin") is not None:
-            nm_val += f" (avg {_avg_nm:.0f}%)"
-        m1.metric("Net Margin", nm_val)
+            m1.caption(f"Basket avg: {_avg_nm:.0f}%")
         m2.metric("Free Cash Flow", _fmt_cash(fund.get("fcf")))
         m3.metric("FCF Margin", _fmt_pct(fund.get("fcf_margin")))
         m4.metric("Revenue Growth", _fmt_pct(fund.get("revenue_growth")))
 
         m5, m6, m7, m8 = st.columns(4)
-        pe_val = f"{fund['pe_ttm']:.1f}" if fund.get("pe_ttm") else "—"
+        m5.metric("P/E (TTM)", f"{fund['pe_ttm']:.1f}" if fund.get("pe_ttm") else "—")
         if _avg_pe and fund.get("pe_ttm"):
-            pe_val += f" (avg {_avg_pe:.0f})"
-        m5.metric("P/E (TTM)", pe_val)
-        fpe_val = f"{fund['forward_pe']:.1f}" if fund.get("forward_pe") else "—"
+            m5.caption(f"Basket avg: {_avg_pe:.0f}")
+        m6.metric("Forward P/E", f"{fund['forward_pe']:.1f}" if fund.get("forward_pe") else "—")
         if _avg_fpe and fund.get("forward_pe"):
-            fpe_val += f" (avg {_avg_fpe:.0f})"
-        m6.metric("Forward P/E", fpe_val)
+            m6.caption(f"Basket avg: {_avg_fpe:.0f}")
         m7.metric("ROE", _fmt_pct(fund.get("roe")))
-        de_val = f"{fund['debt_to_equity']:.0f}%" if fund.get("debt_to_equity") else "—"
+        m8.metric("D/E", f"{fund['debt_to_equity']:.0f}%" if fund.get("debt_to_equity") else "—")
         if _avg_de and fund.get("debt_to_equity"):
-            de_val += f" (avg {_avg_de:.0f}%)"
-        m8.metric("D/E", de_val)
+            m8.caption(f"Basket avg: {_avg_de:.0f}%")
 
         m9, m10, m11, m12 = st.columns(4)
         m9.metric("Current Ratio", f"{fund['current_ratio']:.2f}" if fund.get("current_ratio") else "—")
-        dy_val = f"{fund['dividend_yield']:.2f}%" if fund.get("dividend_yield") else "—"
+        m10.metric("Dividend Yield", f"{fund['dividend_yield']:.2f}%" if fund.get("dividend_yield") else "—")
         if _avg_dy and fund.get("dividend_yield"):
-            dy_val += f" (avg {_avg_dy:.1f}%)"
-        m10.metric("Dividend Yield", dy_val)
+            m10.caption(f"Basket avg: {_avg_dy:.1f}%")
         inst = fund.get("institutional_ownership")
         m11.metric("Institutional %", f"{inst:.1f}%" if inst else "—")
         m12.metric("Beta", f"{fund['beta']:.2f}" if fund.get("beta") else "—")
@@ -461,7 +456,19 @@ with tab_detail:
         else:
             checks.append(("Growth data unavailable", "Can't assess revenue/earnings trend", None))
 
-        # 5. Insider buying?
+        # 5. Smart money — institutional ownership
+        inst_own = fund.get("institutional_ownership")
+        if inst_own is not None:
+            if inst_own > 70:
+                checks.append(("Smart money is in", f"{inst_own:.0f}% institutional ownership — big funds are invested", True))
+            elif inst_own > 40:
+                checks.append(("Moderate institutional interest", f"{inst_own:.0f}% institutional ownership", None))
+            else:
+                checks.append(("Low institutional ownership", f"Only {inst_own:.0f}% held by institutions — smart money isn't interested", False))
+        else:
+            checks.append(("No institutional data", "Institutional ownership unavailable", None))
+
+        # 6. Insider buying?
         insider = fetch_insider_activity(selected)
         ins_label = insider["net_label"]
         ins_buys = insider["buys"]
