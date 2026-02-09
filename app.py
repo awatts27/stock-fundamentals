@@ -238,7 +238,8 @@ with tab_alerts:
                         st.success("No actionable alerts right now.")
 
             # Show how many stocks were filtered out
-            total = len(fundamentals_df[~fundamentals_df.get("is_etf", False)])
+            is_etf = fundamentals_df["is_etf"].fillna(False) if "is_etf" in fundamentals_df.columns else pd.Series(False, index=fundamentals_df.index)
+            total = len(fundamentals_df[~is_etf])
             filtered_out = total - len(quality_tickers)
             if filtered_out > 0:
                 with st.expander(f"{filtered_out} stocks hidden (failed quality gate)"):
